@@ -1,5 +1,6 @@
 """PyAnnote wrapper: local speaker diarization (who speaks when)."""
 
+import os
 from typing import Optional
 
 # pyannote is imported lazily (heavy import) so app startup stays fast.
@@ -34,14 +35,70 @@ class Diarizer:
         result object: use ``speaker_diarization`` to keep the same shape
         across versions.
         """
-        result = self.get_pipeline()(path)
-        annotation = getattr(result, "speaker_diarization", None)
-        if annotation is None:
-            annotation = result  # fallback for pre-4 output (plain Annotation)
-        return [
-            (turn.start, turn.end, speaker)
-            for turn, _, speaker in annotation.itertracks(yield_label=True)
-        ]
+        pipeline = self.get_pipeline()
+        file, temp_path = self._safe_input(path)
+        try:
+            result = pipeline(file)
+            annotation = getattr(result, "speaker_diarization", None)
+            if annotation is None:
+                annotation = result  # fallback for pre-4 output (plain Annotation)
+            return [
+                (turn.start, turn.end, speaker)
+                for turn, _, speaker in annotation.itertracks(yield_label=True)
+            ]
+        finally:
+            if temp_path is not None:
+                os.remove(temp_path)
+
+    @staticmethod
+    def _safe_input(path: str):
+        """Return ``(pyannote_input, temp_path_or_None)``, decoding via PyAV when needed.
+
+        torchcodec (pyannote 4's audio reader) reports ``None`` duration from
+        the container header for some MKV files, which crashes its crop() with
+        ``NoneType * int``. WAV files always carry a valid header, so we decode
+        to a temporary 16 kHz mono WAV with PyAV (which reads those MKVs fine)
+        and return that path instead. The caller removes the temp file.
+        """
+        import tempfile
+
+        import av
+
+        try:
+            from torchcodec.decoders import AudioDecoder
+
+            decoder = AudioDecoder(path)
+            has_header_duration = decoder.metadata.duration_seconds_from_header is not None
+        except Exception:
+            has_header_duration = True  # let pyannote surface non-media errors
+
+        if has_header_duration:
+            return path, None
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
+        with av.open(path) as container:
+            out = av.open(tmp.name, "w")
+            try:
+                stream = out.add_stream("pcm_s16le", rate=16000)
+                stream.layout = "mono"
+                resampler = av.AudioResampler(
+                    format="s16",
+                    layout="mono",
+                    rate=16000,
+                )
+                for frame in container.decode(audio=0):
+                    for resampled in resampler.resample(frame):
+                        for packet in stream.encode(resampled):
+                            out.mux(packet)
+                for resampled in resampler.resample(None):
+                    for packet in stream.encode(resampled):
+                        out.mux(packet)
+                for packet in stream.encode():
+                    out.mux(packet)
+            finally:
+                out.close()
+        return tmp.name, tmp.name
 
     @staticmethod
     def _check_token() -> None:
