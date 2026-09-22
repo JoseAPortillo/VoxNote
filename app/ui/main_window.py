@@ -26,6 +26,7 @@ from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
 from app.ui.media_list import MediaList
+from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.workers import InferenceWorker
 
@@ -47,6 +48,8 @@ class MainWindow(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self._playing_path: str | None = None
+        self._seeking = False
+        self._duration_ms = 0
 
         self._dark = load_dark_setting()
         app = QApplication.instance()
@@ -83,6 +86,19 @@ class MainWindow(QMainWindow):
 
         self.media_list = MediaList(self.repository)
         layout.addWidget(self.media_list, stretch=3)
+
+        # Playback bar: seek slider + elapsed/total time (hidden until a
+        # source is loaded; durationChanged shows it).
+        self.playback_bar = QWidget()
+        bar_layout = QHBoxLayout(self.playback_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(8)
+        self.seek_slider = SeekSlider()
+        self.time_label = QLabel("00:00 / 00:00")
+        bar_layout.addWidget(self.seek_slider, stretch=1)
+        bar_layout.addWidget(self.time_label)
+        layout.addWidget(self.playback_bar)
+        self.playback_bar.setVisible(False)
 
         buttons = QHBoxLayout()
         self.chk_diarize = QCheckBox("Separar hablantes")
@@ -127,6 +143,10 @@ class MainWindow(QMainWindow):
         self.media_list.itemSelectionChanged.connect(self._refresh_buttons)
         self.media_list.play_requested.connect(self._toggle_play)
         self.player.mediaStatusChanged.connect(self._on_media_status)
+        self.player.durationChanged.connect(self._on_duration_changed)
+        self.player.positionChanged.connect(self._on_position_changed)
+        self.seek_slider.sliderPressed.connect(self._on_seek_pressed)
+        self.seek_slider.sliderReleased.connect(self._on_seek_released)
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
@@ -209,6 +229,12 @@ class MainWindow(QMainWindow):
             return
         self._stop_playback(reset_status=False)
         self._playing_path = path
+        # Reset the seek bar for the new source; durationChanged re-ranges it.
+        self._seeking = False
+        self._duration_ms = 0
+        self.seek_slider.setValue(0)
+        self.time_label.setText("00:00 / 00:00")
+        self.playback_bar.setVisible(True)
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
         self.media_list.set_playing(path)
@@ -222,12 +248,53 @@ class MainWindow(QMainWindow):
         self.player.stop()
         self.media_list.set_stopped(self._playing_path)
         self._playing_path = None
+        self._seeking = False
+        self._duration_ms = 0
+        self.seek_slider.setValue(0)
+        self.time_label.setText("00:00 / 00:00")
+        self.playback_bar.setVisible(False)
         if reset_status:
             self.status_label.setText("Listo.")
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._stop_playback()
+
+    # -- seek bar -------------------------------------------------------------
+    @staticmethod
+    def _fmt_ms(ms: int) -> str:
+        """Format milliseconds as ``mm:ss`` (or ``h:mm:ss`` past one hour)."""
+        total_s = max(0, int(ms) // 1000)
+        m, s = divmod(total_s, 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def _sync_time_label(self, elapsed_ms: int) -> None:
+        self.time_label.setText(
+            f"{self._fmt_ms(elapsed_ms)} / {self._fmt_ms(self._duration_ms)}"
+        )
+
+    def _on_duration_changed(self, duration: int) -> None:
+        self._duration_ms = duration
+        self.seek_slider.setRange(0, duration)
+        self.playback_bar.setVisible(True)
+        self._sync_time_label(self.seek_slider.value())
+
+    def _on_position_changed(self, position: int) -> None:
+        if self._seeking:
+            return
+        self.seek_slider.setValue(position)
+        self._sync_time_label(position)
+
+    def _on_seek_pressed(self) -> None:
+        self._seeking = True
+
+    def _on_seek_released(self) -> None:
+        self._seeking = False
+        self.player.setPosition(self.seek_slider.value())
+        self._sync_time_label(self.seek_slider.value())
 
     def _on_done(self, text: str, language: str, segments) -> None:
         self._last_text = text

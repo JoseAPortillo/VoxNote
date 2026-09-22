@@ -197,6 +197,30 @@ QProgressBar::chunk {
     border-radius: 5px;
 }
 
+/* ===== Seek slider ===== */
+QSlider::groove:horizontal {
+    height: 5px;
+    background: $surface_alt;
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal {
+    background: $accent;
+    border-radius: 2px;
+}
+QSlider::add-page:horizontal {
+    background: $border;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: $accent;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+QSlider::handle:horizontal:hover { background: $accent_hover; }
+QSlider:disabled::handle:horizontal { background: $disabled; }
+
 /* ===== Output ===== */
 QPlainTextEdit, QTextEdit {
     background-color: $input_bg;
