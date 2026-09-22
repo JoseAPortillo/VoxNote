@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from PySide6.QtCore import QUrl
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +42,11 @@ class MainWindow(QMainWindow):
         self._last_text: str | None = None
         self._last_lang: str | None = None
         self._last_segments: list[TimedSegment] | None = None
+
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+        self._playing_path: str | None = None
 
         self._dark = load_dark_setting()
         app = QApplication.instance()
@@ -118,6 +125,8 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.media_list.items_changed.connect(self._refresh_buttons)
         self.media_list.itemSelectionChanged.connect(self._refresh_buttons)
+        self.media_list.play_requested.connect(self._toggle_play)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
@@ -153,6 +162,7 @@ class MainWindow(QMainWindow):
         if path is None:
             QMessageBox.information(self, "Selección", "Selecciona un archivo de la lista.")
             return
+        self._stop_playback(reset_status=False)
         diarize = self.chk_diarize.isChecked()
         self._last_text = None
         self._last_lang = None
@@ -185,6 +195,39 @@ class MainWindow(QMainWindow):
         self.output.appendPlainText(text)
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    # -- media playback -------------------------------------------------------
+    def _toggle_play(self, path: str) -> None:
+        """Play/pause the audio of ``path`` (audio-only, no video window)."""
+        if self._playing_path == path:
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.player.pause()
+                self.status_label.setText("Reproducción pausada.")
+            else:
+                self.player.play()
+                self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+            return
+        self._stop_playback(reset_status=False)
+        self._playing_path = path
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.play()
+        self.media_list.set_playing(path)
+        self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+
+    def _stop_playback(self, reset_status: bool = True) -> None:
+        """Stop playback and restore the row's play icon. With
+        ``reset_status`` also clears the status label."""
+        if self._playing_path is None:
+            return
+        self.player.stop()
+        self.media_list.set_stopped(self._playing_path)
+        self._playing_path = None
+        if reset_status:
+            self.status_label.setText("Listo.")
+
+    def _on_media_status(self, status) -> None:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._stop_playback()
 
     def _on_done(self, text: str, language: str, segments) -> None:
         self._last_text = text
@@ -245,6 +288,7 @@ class MainWindow(QMainWindow):
         self.btn_save.setEnabled(not busy and self._last_segments is not None)
 
     def closeEvent(self, event) -> None:
+        self._stop_playback()
         if self._worker is not None and self._worker.isRunning():
             self.status_label.setText("Esperando a que termine la tarea…")
             self._worker.wait()
