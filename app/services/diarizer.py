@@ -28,11 +28,19 @@ class Diarizer:
         return self._pipeline
 
     def diarize(self, path: str):
-        """Return speaker turns as a list of ``(start, end, speaker_label)``."""
-        diarization = self.get_pipeline()(path)
+        """Return speaker turns as a list of ``(start, end, speaker_label)``.
+
+        pyannote 4 wraps the classic ``Annotation`` in a ``DiarizeOutput``
+        result object: use ``speaker_diarization`` to keep the same shape
+        across versions.
+        """
+        result = self.get_pipeline()(path)
+        annotation = getattr(result, "speaker_diarization", None)
+        if annotation is None:
+            annotation = result  # fallback for pre-4 output (plain Annotation)
         return [
             (turn.start, turn.end, speaker)
-            for turn, _, speaker in diarization.itertracks(yield_label=True)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
         ]
 
     @staticmethod
