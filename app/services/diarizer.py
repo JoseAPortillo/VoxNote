@@ -24,8 +24,11 @@ class Diarizer:
         if self._pipeline is None:
             self._check_token()
             from pyannote.audio import Pipeline
+            import torch
 
             self._pipeline = Pipeline.from_pretrained(self.MODEL_ID, token=self.hf_token)
+            if torch.cuda.is_available():
+                self._pipeline.to(torch.device("cuda"))
         return self._pipeline
 
     def diarize(self, path: str):
