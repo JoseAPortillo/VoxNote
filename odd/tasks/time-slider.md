@@ -69,5 +69,7 @@ All smokes run with the repo venv (`.venv\Scripts\python.exe`, Python 3.14.3) an
   - items.json hash identical before/after
 - Import smoke: `& .venv\Scripts\python.exe -c "from app.ui.main_window import MainWindow"` → `IMPORT OK: app.ui.main_window`
 - Theme smoke: `apply_theme(app, True/False)` → QSS contains `QSlider::groove/sub-page/add-page/handle:horizontal` + `QSlider:disabled::handle:horizontal`, no unsubstituted `$`, accent `#4f8cff` (dark) / `#2f6fed` (light) present → ALL PASS
-- Commit: ONE work-unit commit on `feature/time-slider` — message follows repo style (Spanish conventional, no AI attribution).
+- Commit: ONE work-unit commit on `feature/time-slider` — message follows repo style (Spanish conventional, no AI attribution). SHA full: `fed000476fd6bf7d38f6195f08c5590ee05f4784` (`fed0004`).
+- Parent spot check (orchestrator): re-ejecución de `smoke_playback.py` → ALL PASS (23/23, incluido click mid → position=1500, drag → 2278, bar hidden/reset tras stop, items.json intacto).
+- RDD off (default): `gentle-ai review assess` diff main..feature/time-slider → medium (executable_change app/ui/main_window.py), 197 líneas, review_due=under_budget. Sin ceremonia de review.
 - Slider nuance: while dragging, the final landed value is Qt's own handle maths (super is called after our setValue), so a drag ending at x=3/4 lands at ~3/4 of the range (±~1-2 px offset); a plain click lands exactly at `sliderValueFromPosition`. This matches the spec (handling stays native).
