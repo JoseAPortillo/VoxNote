@@ -2,7 +2,7 @@
 
 from typing import Callable, Optional
 
-from app.core.models import TimedSegment
+from app.core.models import RunResult, TimedSegment
 from app.services import translator as argos
 from app.services.diarizer import Diarizer, assign_speaker, speaker_index
 from app.services.transcriber import Transcriber
@@ -23,6 +23,13 @@ class Pipeline:
     (``[Hablante N]``). Diarization is offline: the speaker turns are computed
     before transcription starts, so the output stops streaming live while the
     diarization pass runs.
+
+    Every entry point returns a :class:`RunResult`: ``transcribe`` fills the
+    transcript side; ``transcribe_and_translate`` fills BOTH sides, with the
+    transcript side holding the ORIGINAL (untranslated) lines/segments and the
+    translation side the translated ones. ``on_segment`` always receives the
+    line the app shows live: the raw text for transcribe, the translated text
+    for translate.
     """
 
     def __init__(
@@ -44,7 +51,7 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
-    ) -> tuple[str, str, list[TimedSegment]]:
+    ) -> RunResult:
         if diarize:
             return self._run_diarized(
                 path, translate=False,
@@ -67,7 +74,11 @@ class Pipeline:
                 on_segment(text)
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
-        return "\n".join(lines), info.language, timed
+        return RunResult(
+            transcript_text="\n".join(lines),
+            transcript_lang=info.language,
+            transcript_segments=timed,
+        )
 
     def transcribe_and_translate(
         self,
@@ -76,7 +87,7 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
-    ) -> tuple[str, str, list[TimedSegment]]:
+    ) -> RunResult:
         if diarize:
             return self._run_diarized(
                 path, translate=True,
@@ -94,6 +105,10 @@ class Pipeline:
         total = info.duration or 0.0
         lines: list[str] = []
         timed: list[TimedSegment] = []
+        # Keep the ORIGINAL (pre-translation) sides too: the app shows both
+        # panes and persists both per media file.
+        orig_lines: list[str] = []
+        orig_timed: list[TimedSegment] = []
         for segment in segments:
             text = segment.text.strip()
             if not text:
@@ -103,11 +118,20 @@ class Pipeline:
             translated = argos.translate_text(text, detected, self.target_lang)
             lines.append(translated)
             timed.append(TimedSegment(segment.start, segment.end, translated, None))
+            orig_lines.append(text)
+            orig_timed.append(TimedSegment(segment.start, segment.end, text, None))
             if on_segment:
                 on_segment(translated)
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
-        return "\n".join(lines), detected, timed
+        return RunResult(
+            transcript_text="\n".join(orig_lines),
+            transcript_lang=detected,
+            transcript_segments=orig_timed,
+            translation_text="\n".join(lines),
+            translation_lang=self.target_lang,
+            translation_segments=timed,
+        )
 
     # -- internal ------------------------------------------------------------
 
@@ -125,7 +149,7 @@ class Pipeline:
         on_segment: Callback,
         on_progress: ProgressCallback,
         on_status: Callback,
-    ) -> tuple[str, str, list[TimedSegment]]:
+    ) -> RunResult:
         # Offline pass: who speaks when (slow on CPU, no live output yet).
         if on_status:
             on_status("Analizando hablantes (diarización)…")
@@ -146,6 +170,9 @@ class Pipeline:
         total = info.duration or 0.0
         lines: list[str] = []
         timed: list[TimedSegment] = []
+        # Original sides (with the same speaker labels) for the transcript pane.
+        orig_lines: list[str] = []
+        orig_timed: list[TimedSegment] = []
         current_speaker = None
         current_texts: list[str] = []
         current_bounds: list[tuple[float, float]] = []
@@ -157,6 +184,7 @@ class Pipeline:
             raw = " ".join(current_texts)
             text = argos.translate_text(raw, detected, self.target_lang) if translate else raw
             label = f"[Hablante {labels.get(current_speaker, '?')}] " if current_speaker else ""
+            orig_line = f"{label}{raw}"
             line = f"{label}{text}"
             lines.append(line)
             timed.append(
@@ -164,6 +192,15 @@ class Pipeline:
                     start=current_bounds[0][0],
                     end=current_bounds[-1][1],
                     text=line,
+                    speaker=labels.get(current_speaker),
+                )
+            )
+            orig_lines.append(orig_line)
+            orig_timed.append(
+                TimedSegment(
+                    start=current_bounds[0][0],
+                    end=current_bounds[-1][1],
+                    text=orig_line,
                     speaker=labels.get(current_speaker),
                 )
             )
@@ -186,4 +223,17 @@ class Pipeline:
                 on_progress(segment.end / total * 100.0)
         flush()
 
-        return "\n".join(lines), detected, timed
+        if translate:
+            return RunResult(
+                transcript_text="\n".join(orig_lines),
+                transcript_lang=detected,
+                transcript_segments=orig_timed,
+                translation_text="\n".join(lines),
+                translation_lang=self.target_lang,
+                translation_segments=timed,
+            )
+        return RunResult(
+            transcript_text="\n".join(lines),
+            transcript_lang=detected,
+            transcript_segments=timed,
+        )

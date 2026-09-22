@@ -95,6 +95,12 @@ QLabel#hintLabel {
     font-size: 12px;
     padding: 2px;
 }
+QLabel#paneLabel {
+    color: $text_muted;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px;
+}
 
 /* ===== Buttons ===== */
 QPushButton {

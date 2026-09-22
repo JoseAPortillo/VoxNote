@@ -52,6 +52,42 @@ class MediaRepository:
             return self._items[index]
         return None
 
+    def index_of(self, path: str) -> int | None:
+        """Index of ``path`` (case-insensitive, same normalization as
+        :meth:`add`), or None when the file is not registered."""
+        normalized = str(Path(path))
+        for i, item in enumerate(self._items):
+            if item.path.lower() == normalized.lower():
+                return i
+        return None
+
+    def update_results(
+        self,
+        index: int,
+        *,
+        transcript_text=None,
+        transcript_lang=None,
+        transcript_segments=None,
+        translation_text=None,
+        translation_lang=None,
+        translation_segments=None,
+    ) -> None:
+        """Set ONLY the provided (non-None) result fields on the item at
+        ``index`` and persist. Fields left at None keep their stored value."""
+        item = self._items[index]
+        updates = {
+            "transcript_text": transcript_text,
+            "transcript_lang": transcript_lang,
+            "transcript_segments": transcript_segments,
+            "translation_text": translation_text,
+            "translation_lang": translation_lang,
+            "translation_segments": translation_segments,
+        }
+        for name, value in updates.items():
+            if value is not None:
+                setattr(item, name, value)
+        self.save()
+
     def add(self, path: str) -> MediaItem:
         """Register a file; duplicate paths (case-insensitive) are ignored."""
         normalized = str(Path(path))

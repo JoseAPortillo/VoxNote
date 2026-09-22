@@ -1,17 +1,30 @@
 """Domain data models."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 
 @dataclass
 class MediaItem:
-    """A media file registered in the working list."""
+    """A media file registered in the working list.
+
+    Result fields (``transcript_*`` / ``translation_*``) are optional and
+    persisted per file. They all default to None so old ``items.json`` entries
+    that only carry ``path``/``alias``/``added_at`` still load via
+    ``MediaItem(**entry)``.
+    """
 
     path: str
     alias: str
     added_at: str  # ISO-8601 timestamp captured when the entry was added
+
+    transcript_text: str | None = None
+    transcript_lang: str | None = None
+    transcript_segments: list | None = None
+    translation_text: str | None = None
+    translation_lang: str | None = None
+    translation_segments: list | None = None
 
     @classmethod
     def from_path(cls, path: str) -> "MediaItem":
@@ -31,3 +44,29 @@ class TimedSegment:
     end: float    # seconds
     text: str
     speaker: str | None  # friendly 1-based speaker id, or None when unknown
+
+    def to_dict(self) -> dict:
+        """JSON-ready dict (dataclasses.asdict) for repository persistence."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TimedSegment":
+        """Rebuild a segment persisted via :meth:`to_dict`."""
+        return cls(**d)
+
+
+@dataclass
+class RunResult:
+    """Output of a pipeline run; empty/None fields mean "not produced".
+
+    ``transcribe`` fills the transcript side; ``transcribe_and_translate``
+    fills both sides (transcript holds the ORIGINAL text and segments,
+    translation the translated ones).
+    """
+
+    transcript_text: str = ""
+    transcript_lang: str = ""
+    transcript_segments: list[TimedSegment] | None = None
+    translation_text: str = ""
+    translation_lang: str = ""
+    translation_segments: list[TimedSegment] | None = None

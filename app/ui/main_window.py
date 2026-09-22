@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.config import DIARIZE_SPEAKERS, TRANSLATE_TARGET_LANG
-from app.core.models import TimedSegment
+from app.core.models import RunResult, TimedSegment
 from app.services.exporter import export as export_transcript
 from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
@@ -40,9 +40,9 @@ class MainWindow(QMainWindow):
         self.repository = MediaRepository()
         self.pipeline = Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)
         self._worker: InferenceWorker | None = None
-        self._last_text: str | None = None
-        self._last_lang: str | None = None
-        self._last_segments: list[TimedSegment] | None = None
+        self._last_run: RunResult | None = None
+        self._active_pane: str = "transcript"  # pane receiving live segments
+        self._running_path: str | None = None  # path persisted on done
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -127,20 +127,48 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Listo.")
         layout.addWidget(self.status_label)
 
-        self.output = QPlainTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setPlaceholderText(
-            "La transcripción aparecerá aquí.\n"
-            "• Transcribir: idioma original del audio.\n"
-            f"• Traducir: texto en {TRANSLATE_TARGET_LANG.upper()}."
+        # Two side-by-side panes: transcription (original) | translation.
+        pane_transcript, self.pane_transcript = self._make_pane(
+            "Transcripción",
+            "La transcripción (idioma original) aparecerá aquí.",
         )
-        layout.addWidget(self.output, stretch=4)
+        pane_translation, self.pane_translation = self._make_pane(
+            "Traducción",
+            "La traducción aparecerá aquí. Transcribir llena solo la izquierda; "
+            "Traducir llena ambas.",
+        )
+        panes = QHBoxLayout()
+        panes.setSpacing(8)
+        panes.addWidget(pane_transcript, stretch=1)
+        panes.addWidget(pane_translation, stretch=1)
+        layout.addLayout(panes, stretch=4)
 
         self.setCentralWidget(central)
+
+    def _make_pane(self, title: str, placeholder: str) -> tuple[QWidget, QPlainTextEdit]:
+        """A labeled read-only text pane: header label over a text box.
+
+        Returns ``(column_widget, edit)``: the column goes into the layout,
+        the edit is kept so the window can route segments and restore text.
+        """
+        pane = QWidget()
+        column = QVBoxLayout(pane)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        header = QLabel(title)
+        header.setObjectName("paneLabel")
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlaceholderText(placeholder)
+        edit.setAccessibleName(title)
+        column.addWidget(header)
+        column.addWidget(edit, stretch=1)
+        return pane, edit
 
     def _connect_signals(self) -> None:
         self.media_list.items_changed.connect(self._refresh_buttons)
         self.media_list.itemSelectionChanged.connect(self._refresh_buttons)
+        self.media_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.media_list.play_requested.connect(self._toggle_play)
         self.player.mediaStatusChanged.connect(self._on_media_status)
         self.player.durationChanged.connect(self._on_duration_changed)
@@ -172,27 +200,29 @@ class MainWindow(QMainWindow):
 
     # -- actions -------------------------------------------------------------
     def _start_transcribe(self) -> None:
-        self._run(self.pipeline.transcribe)
+        self._run(self.pipeline.transcribe, "transcript")
 
     def _start_translate(self) -> None:
-        self._run(self.pipeline.transcribe_and_translate)
+        self._run(self.pipeline.transcribe_and_translate, "translation")
 
-    def _run(self, fn) -> None:
+    def _run(self, fn, pane: str) -> None:
         path = self.media_list.selected_path()
         if path is None:
             QMessageBox.information(self, "Selección", "Selecciona un archivo de la lista.")
             return
         self._stop_playback(reset_status=False)
         diarize = self.chk_diarize.isChecked()
-        self._last_text = None
-        self._last_lang = None
-        self._last_segments = None
-        self.output.clear()
+        self._running_path = path
+        self._active_pane = pane
+        self._last_run = None
+        # Clear only the pane being produced; the other one keeps its content.
+        active_pane = self.pane_transcript if pane == "transcript" else self.pane_translation
+        active_pane.clear()
         self.progress.setValue(0)
         self.status_label.setText("Iniciando…")
         self._set_busy(True)
 
-        def runnable(path, on_segment, on_progress, on_status) -> tuple[str, str]:
+        def runnable(path, on_segment, on_progress, on_status) -> RunResult:
             return fn(
                 path,
                 on_segment=on_segment,
@@ -212,8 +242,9 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _append_segment(self, text: str) -> None:
-        self.output.appendPlainText(text)
-        scrollbar = self.output.verticalScrollBar()
+        pane = self.pane_transcript if self._active_pane == "transcript" else self.pane_translation
+        pane.appendPlainText(text)
+        scrollbar = pane.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     # -- media playback -------------------------------------------------------
@@ -296,12 +327,80 @@ class MainWindow(QMainWindow):
         self.player.setPosition(self.seek_slider.value())
         self._sync_time_label(self.seek_slider.value())
 
-    def _on_done(self, text: str, language: str, segments) -> None:
-        self._last_text = text
-        self._last_lang = language
-        self._last_segments = list(segments) if segments is not None else []
-        self.status_label.setText(f"Completado. Idioma detectado: {language}.")
+    # -- run results ----------------------------------------------------------
+    def _on_done(self, result: RunResult) -> None:
+        self._last_run = result
+        if result.translation_text:
+            # Translate produced both sides: original left, translation right.
+            self.pane_translation.setPlainText(result.translation_text)
+            if result.transcript_text:
+                self.pane_transcript.setPlainText(result.transcript_text)
+            self._persist_results(
+                translation_text=result.translation_text,
+                translation_lang=result.translation_lang,
+                translation_segments=result.translation_segments,
+            )
+        else:
+            self.pane_transcript.setPlainText(result.transcript_text)
+            self._persist_results(
+                transcript_text=result.transcript_text,
+                transcript_lang=result.transcript_lang,
+                transcript_segments=result.transcript_segments,
+            )
+        lang = result.translation_lang or result.transcript_lang
+        self.status_label.setText(f"Completado. Idioma detectado: {lang or '?'}.")
         self._set_busy(False)
+
+    def _persist_results(self, **fields) -> None:
+        """Write the produced result fields for ``_running_path``.
+
+        Segment lists become ``[s.to_dict() for s in ...]``; a None list is
+        stored as ``[]`` (the produced kind always gets persisted). Fields not
+        passed here are left untouched by :meth:`MediaRepository.update_results`.
+        """
+        if self._running_path is None:
+            return
+        idx = self.repository.index_of(self._running_path)
+        if idx is None:
+            return
+        payload: dict = {}
+        for name, value in fields.items():
+            if name.endswith("_segments"):
+                payload[name] = [s.to_dict() for s in value] if value is not None else []
+            else:
+                payload[name] = value
+        self.repository.update_results(idx, **payload)
+
+    def _on_selection_changed(self) -> None:
+        """Restore the persisted results of the selected item, or clear panes."""
+        path = self.media_list.selected_path()
+        if path is None:
+            self.pane_transcript.clear()
+            self.pane_translation.clear()
+            self._last_run = None
+            return
+        idx = self.repository.index_of(path)
+        item = self.repository.get(idx) if idx is not None else None
+        if item is not None and (item.transcript_text or item.translation_text):
+            self.pane_transcript.setPlainText(item.transcript_text or "")
+            self.pane_translation.setPlainText(item.translation_text or "")
+            self._last_run = RunResult(
+                transcript_text=item.transcript_text or "",
+                transcript_lang=item.transcript_lang or "",
+                transcript_segments=[
+                    TimedSegment.from_dict(d) for d in item.transcript_segments
+                ] if item.transcript_segments else None,
+                translation_text=item.translation_text or "",
+                translation_lang=item.translation_lang or "",
+                translation_segments=[
+                    TimedSegment.from_dict(d) for d in item.translation_segments
+                ] if item.translation_segments else None,
+            )
+        else:
+            self.pane_transcript.clear()
+            self.pane_translation.clear()
+            self._last_run = None
+        self._refresh_buttons()
 
     def _on_failed(self, message: str) -> None:
         self._set_busy(False)
@@ -318,12 +417,23 @@ class MainWindow(QMainWindow):
         else:
             default_dir = str(Path.home())
             stem = "transcripcion"
-        name = f"{stem}.{self._last_lang}.txt" if self._last_lang else f"{stem}.txt"
+        lang = None
+        if self._last_run is not None:
+            lang = self._last_run.translation_lang or self._last_run.transcript_lang
+        name = f"{stem}.{lang}.txt" if lang else f"{stem}.txt"
         return str(Path(default_dir) / name)
 
     def _start_save(self) -> None:
-        if not self._last_segments:
+        if self._last_run is None:
             return
+        segments = (
+            self._last_run.translation_segments
+            if self._last_run.translation_segments
+            else self._last_run.transcript_segments
+        )
+        if not segments:
+            return
+        language = self._last_run.translation_lang or self._last_run.transcript_lang
         captured, _selected_filter = QFileDialog.getSaveFileName(
             self, "Guardar transcripción como…", self._suggested_save_path(),
             "Texto (*.txt)",
@@ -335,7 +445,7 @@ class MainWindow(QMainWindow):
             txt_path = txt_path.with_suffix(".txt")
         base = str(txt_path.with_suffix(""))
         try:
-            export_transcript(self._last_segments, base, self._last_lang)
+            export_transcript(segments, base, language)
         except Exception as exc:
             self.status_label.setText("Error al guardar.")
             QMessageBox.critical(
@@ -352,7 +462,7 @@ class MainWindow(QMainWindow):
         has_selection = self.media_list.selected_path() is not None
         self.btn_transcribe.setEnabled(not busy and has_selection)
         self.btn_translate.setEnabled(not busy and has_selection)
-        self.btn_save.setEnabled(not busy and self._last_segments is not None)
+        self.btn_save.setEnabled(not busy and self._last_run is not None)
 
     def closeEvent(self, event) -> None:
         self._stop_playback()

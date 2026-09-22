@@ -4,10 +4,10 @@ from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
-from app.core.models import TimedSegment
+from app.core.models import RunResult
 
 # Pipeline callables share the signature:
-#   (path, on_segment, on_progress, on_status) -> (full_text, language_code, segments)
+#   (path, on_segment, on_progress, on_status) -> RunResult
 
 
 class InferenceWorker(QThread):
@@ -16,7 +16,7 @@ class InferenceWorker(QThread):
     segment_ready = Signal(str)
     progress = Signal(float)
     status = Signal(str)
-    done = Signal(str, str, object)  # (full text, detected language, timed segments)
+    done = Signal(object)  # emits the RunResult produced by the pipeline call
     failed = Signal(str)
 
     def __init__(self, fn: Callable, path: str, parent=None):
@@ -26,12 +26,12 @@ class InferenceWorker(QThread):
 
     def run(self) -> None:
         try:
-            text, language, segments = self._fn(
+            result = self._fn(
                 self._path,
                 on_segment=self.segment_ready.emit,
                 on_progress=self.progress.emit,
                 on_status=self.status.emit,
             )
-            self.done.emit(text, language, segments)
+            self.done.emit(result)
         except Exception as exc:  # surface any failure in the UI
             self.failed.emit(str(exc))
