@@ -74,3 +74,8 @@ Save TXT/SRT + playback + seek are done; the output model (one pane, transient) 
   - Bug caught+fixed during smoke: button refresh ordering — `_refresh_buttons` now re-run at the end of `_on_selection_changed` so Save disables/enables with selection restores.
 - Smoke 6 (import/theme): `from app.ui.main_window import MainWindow` OK; applied QSS contains `QLabel#paneLabel` rule. PASS
 - Diff size: 6 app files, +286/−45 → single work-unit commit (forecast < 400 lines held).
+- Correcciones del orquestador (commit `a7ea3c3 fix: persistir transcripcion original al traducir y cerrar sin crash tras un run`):
+  - Traducir persiste AHORA ambos lados (transcript + translation): el pipeline genera el original en el mismo run; antes solo se persistía la traducción y al reseleccionar el audio el panel izquierdo quedaba vacío.
+  - `closeEvent` tolera el worker ya borrado (finished → deleteLater → RuntimeError al llamar `isRunning()`); bug pre-existente destapado por la smoke 5.
+  - Smoke de correcciones (`split-fix-smoke`): FIX1 translate persiste transcript AND translation PASS; FIX2 close con worker borrado sin crash PASS + close con worker vivo wait-path PASS. ALL PASS.
+- RDD off (default): `gentle-ai review assess` diff main..feature/split-output-persistence → medium (executable_change app/core/models.py), 407 líneas reales, review_due=slice_budget_reached (informativo con RDD off; sin ceremonia).
