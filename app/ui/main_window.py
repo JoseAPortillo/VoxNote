@@ -332,10 +332,14 @@ class MainWindow(QMainWindow):
         self._last_run = result
         if result.translation_text:
             # Translate produced both sides: original left, translation right.
+            # Persist both so a later selection restores the original too.
             self.pane_translation.setPlainText(result.translation_text)
             if result.transcript_text:
                 self.pane_transcript.setPlainText(result.transcript_text)
             self._persist_results(
+                transcript_text=result.transcript_text,
+                transcript_lang=result.transcript_lang,
+                transcript_segments=result.transcript_segments,
                 translation_text=result.translation_text,
                 translation_lang=result.translation_lang,
                 translation_segments=result.translation_segments,
@@ -466,7 +470,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop_playback()
-        if self._worker is not None and self._worker.isRunning():
-            self.status_label.setText("Esperando a que termine la tarea…")
-            self._worker.wait()
+        # The worker may already be gone after a completed run
+        # (finished → deleteLater): a deleted C++ object raises RuntimeError,
+        # which here simply means "no longer running".
+        if self._worker is not None:
+            try:
+                running = self._worker.isRunning()
+            except RuntimeError:
+                running = False
+            if running:
+                self.status_label.setText("Esperando a que termine la tarea…")
+                self._worker.wait()
         super().closeEvent(event)
