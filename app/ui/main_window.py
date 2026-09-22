@@ -1,6 +1,7 @@
 """Main application window."""
 
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -18,6 +19,7 @@ from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
 from app.ui.media_list import MediaList
+from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.workers import InferenceWorker
 
 
@@ -31,6 +33,11 @@ class MainWindow(QMainWindow):
         self.pipeline = Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)
         self._worker: InferenceWorker | None = None
 
+        self._dark = load_dark_setting()
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self._dark)
+
         self._build_ui()
         self._connect_signals()
         self.media_list.reload()
@@ -38,12 +45,26 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget(self)
+        central.setObjectName("central")
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
+        header = QHBoxLayout()
+        header.setSpacing(8)
         hint = QLabel(
             "Arrastra vídeos o audios aquí · doble clic: alias · botón derecho: menú"
         )
-        layout.addWidget(hint)
+        hint.setObjectName("hintLabel")
+        header.addWidget(hint)
+        header.addStretch(1)
+        self.btn_theme = QPushButton()
+        self.btn_theme.setObjectName("themeButton")
+        self.btn_theme.setAccessibleName("Alternar tema oscuro/claro")
+        self.btn_theme.setFixedWidth(42)
+        header.addWidget(self.btn_theme)
+        layout.addLayout(header)
+        self._update_theme_button()
 
         self.media_list = MediaList(self.repository)
         layout.addWidget(self.media_list, stretch=3)
@@ -56,6 +77,7 @@ class MainWindow(QMainWindow):
             "PyAnnote. Requiere HF_TOKEN en .env; la primera vez descarga el modelo."
         )
         self.btn_transcribe = QPushButton("Transcribir")
+        self.btn_transcribe.setObjectName("primaryButton")
         self.btn_translate = QPushButton("Traducir")
         buttons.addWidget(self.chk_diarize)
         buttons.addStretch(1)
@@ -87,6 +109,25 @@ class MainWindow(QMainWindow):
         self.media_list.itemSelectionChanged.connect(self._refresh_buttons)
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
+        self.btn_theme.clicked.connect(self._toggle_theme)
+
+    # -- theme ---------------------------------------------------------------
+    def _toggle_theme(self) -> None:
+        self._dark = not self._dark
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self._dark)
+        save_dark_setting(self._dark)
+        self._update_theme_button()
+
+    def _update_theme_button(self) -> None:
+        # Icon shows the mode you switch TO (sun in dark mode, moon in light).
+        if self._dark:
+            self.btn_theme.setText("☀")
+            self.btn_theme.setToolTip("Cambiar a tema claro")
+        else:
+            self.btn_theme.setText("☾")
+            self.btn_theme.setToolTip("Cambiar a tema oscuro")
 
     # -- actions -------------------------------------------------------------
     def _start_transcribe(self) -> None:
