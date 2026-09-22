@@ -1,0 +1,15 @@
+# Transcripción y traducción local de audio/vídeo
+# Validado con Python 3.14.3 + Windows + RTX 3080
+
+faster-whisper==1.2.1
+ctranslate2==4.7.2
+PySide6==6.11.2
+python-dotenv==1.1.1
+
+# Traducción: Argos Translate (núcleo CTranslate2) + pares de idiomas.
+# Nota: argostranslate importa stanza incondicionalmente, por eso se instala
+# torch CPU (~250 MB, NO CUDA). El runtime real usa MiniSBD + CTranslate2;
+# con ARGOS_CHUNK_TYPE=MINISBD el flujo nunca toca stanza/torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+argostranslate==1.11.0
