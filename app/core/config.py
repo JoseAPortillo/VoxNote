@@ -27,6 +27,13 @@ WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
 # Translation ----------------------------------------------------------------
 TRANSLATE_TARGET_LANG = os.getenv("TRANSLATE_TARGET_LANG", "es")  # Argos code
 
+# Speaker diarization --------------------------------------------------------
+# HF_TOKEN: token gratuito de Hugging Face (requerido para descargar el modelo
+# gated de PyAnnote; la licencia debe aceptarse en huggingface.co/pyannote/...).
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+# Marca por defecto del checkbox "Separar hablantes" en la interfaz.
+DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "true").lower() == "true"
+
 # Media ----------------------------------------------------------------------
 SUPPORTED_EXTENSIONS = {
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",

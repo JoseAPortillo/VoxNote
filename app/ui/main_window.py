@@ -1,6 +1,7 @@
 """Main application window."""
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.config import TRANSLATE_TARGET_LANG
+from app.core.config import DIARIZE_SPEAKERS, TRANSLATE_TARGET_LANG
 from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
@@ -48,11 +49,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.media_list, stretch=3)
 
         buttons = QHBoxLayout()
+        self.chk_diarize = QCheckBox("Separar hablantes")
+        self.chk_diarize.setChecked(DIARIZE_SPEAKERS)
+        self.chk_diarize.setToolTip(
+            "Etiqueta cada línea con su interlocutor ([Hablante N]) usando "
+            "PyAnnote. Requiere HF_TOKEN en .env; la primera vez descarga el modelo."
+        )
         self.btn_transcribe = QPushButton("Transcribir")
         self.btn_translate = QPushButton("Traducir")
+        buttons.addWidget(self.chk_diarize)
+        buttons.addStretch(1)
         buttons.addWidget(self.btn_transcribe)
         buttons.addWidget(self.btn_translate)
-        buttons.addStretch(1)
         layout.addLayout(buttons)
 
         self.progress = QProgressBar()
@@ -92,12 +100,22 @@ class MainWindow(QMainWindow):
         if path is None:
             QMessageBox.information(self, "Selección", "Selecciona un archivo de la lista.")
             return
+        diarize = self.chk_diarize.isChecked()
         self.output.clear()
         self.progress.setValue(0)
         self.status_label.setText("Iniciando…")
         self._set_busy(True)
 
-        worker = InferenceWorker(fn, path, parent=self)
+        def runnable(path, on_segment, on_progress, on_status) -> tuple[str, str]:
+            return fn(
+                path,
+                on_segment=on_segment,
+                on_progress=on_progress,
+                on_status=on_status,
+                diarize=diarize,
+            )
+
+        worker = InferenceWorker(runnable, path, parent=self)
         worker.segment_ready.connect(self._append_segment)
         worker.progress.connect(self.progress.setValue)
         worker.status.connect(self.status_label.setText)

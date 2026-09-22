@@ -13,3 +13,7 @@ python-dotenv==1.1.1
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.14.0+cpu
 argostranslate==1.11.0
+
+# Diarización de hablantes (requiere HF_TOKEN en .env; modelo gated).
+# Los wheels de torchaudio/torchcodec también deben venir del índice CPU.
+pyannote.audio==4.0.7
