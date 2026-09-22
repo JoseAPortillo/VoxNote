@@ -2,6 +2,7 @@
 
 from typing import Callable, Optional
 
+from app.core.models import TimedSegment
 from app.services import translator as argos
 from app.services.diarizer import Diarizer, assign_speaker, speaker_index
 from app.services.transcriber import Transcriber
@@ -43,18 +44,30 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[TimedSegment]]:
         if diarize:
             return self._run_diarized(
                 path, translate=False,
                 on_segment=on_segment, on_progress=on_progress, on_status=on_status,
             )
-        return self.transcriber.transcribe(
-            path,
-            on_segment=on_segment,
-            on_progress=on_progress,
-            on_status=on_status,
-        )
+        if on_status:
+            on_status("Cargando modelo de voz…")
+        self.transcriber.get_model()
+        segments, info = self.transcriber.transcribe_segments(path, task="transcribe")
+        total = info.duration or 0.0
+        lines: list[str] = []
+        timed: list[TimedSegment] = []
+        for segment in segments:
+            text = segment.text.strip()
+            if not text:
+                continue
+            lines.append(text)
+            timed.append(TimedSegment(segment.start, segment.end, text, None))
+            if on_segment:
+                on_segment(text)
+            if on_progress and total:
+                on_progress(segment.end / total * 100.0)
+        return "\n".join(lines), info.language, timed
 
     def transcribe_and_translate(
         self,
@@ -63,7 +76,7 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[TimedSegment]]:
         if diarize:
             return self._run_diarized(
                 path, translate=True,
@@ -80,6 +93,7 @@ class Pipeline:
 
         total = info.duration or 0.0
         lines: list[str] = []
+        timed: list[TimedSegment] = []
         for segment in segments:
             text = segment.text.strip()
             if not text:
@@ -88,11 +102,12 @@ class Pipeline:
             # Acceptable for live output; a whole-text pass is a future option.
             translated = argos.translate_text(text, detected, self.target_lang)
             lines.append(translated)
+            timed.append(TimedSegment(segment.start, segment.end, translated, None))
             if on_segment:
                 on_segment(translated)
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
-        return "\n".join(lines), detected
+        return "\n".join(lines), detected, timed
 
     # -- internal ------------------------------------------------------------
 
@@ -110,7 +125,7 @@ class Pipeline:
         on_segment: Callback,
         on_progress: ProgressCallback,
         on_status: Callback,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[TimedSegment]]:
         # Offline pass: who speaks when (slow on CPU, no live output yet).
         if on_status:
             on_status("Analizando hablantes (diarización)…")
@@ -130,11 +145,13 @@ class Pipeline:
 
         total = info.duration or 0.0
         lines: list[str] = []
+        timed: list[TimedSegment] = []
         current_speaker = None
         current_texts: list[str] = []
+        current_bounds: list[tuple[float, float]] = []
 
         def flush() -> None:
-            nonlocal current_texts
+            nonlocal current_texts, current_bounds
             if not current_texts:
                 return
             raw = " ".join(current_texts)
@@ -142,9 +159,18 @@ class Pipeline:
             label = f"[Hablante {labels.get(current_speaker, '?')}] " if current_speaker else ""
             line = f"{label}{text}"
             lines.append(line)
+            timed.append(
+                TimedSegment(
+                    start=current_bounds[0][0],
+                    end=current_bounds[-1][1],
+                    text=line,
+                    speaker=labels.get(current_speaker),
+                )
+            )
             if on_segment:
                 on_segment(line)
             current_texts = []
+            current_bounds = []
 
         for segment in segments:
             text = segment.text.strip()
@@ -155,8 +181,9 @@ class Pipeline:
                 flush()
             current_speaker = speaker
             current_texts.append(text)
+            current_bounds.append((segment.start, segment.end))
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
         flush()
 
-        return "\n".join(lines), detected
+        return "\n".join(lines), detected, timed

@@ -21,3 +21,13 @@ class MediaItem:
             alias=file_path.stem,
             added_at=datetime.now().isoformat(timespec="seconds"),
         )
+
+
+@dataclass
+class TimedSegment:
+    """A transcript segment with its timing and optional speaker label."""
+
+    start: float  # seconds
+    end: float    # seconds
+    text: str
+    speaker: str | None  # friendly 1-based speaker id, or None when unknown
