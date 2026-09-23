@@ -188,6 +188,35 @@ QListWidget::item:selected:!active {
 }
 QListWidget::item:disabled { color: $disabled; }
 
+/* ===== Tree (media list) ===== */
+QTreeWidget {
+    background-color: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+}
+QTreeWidget::item {
+    padding: 7px 10px;
+    border-radius: 6px;
+}
+QTreeWidget::item:hover { background-color: $hover; }
+QTreeWidget::item:selected { background-color: $selection; color: $text; }
+QTreeWidget::item:selected:!active {
+    background-color: $selection;
+    color: $text;
+}
+QTreeWidget::item:disabled { color: $disabled; }
+
+/* ===== Header (tree columns) ===== */
+QHeaderView::section {
+    background-color: $surface_alt;
+    border: 1px solid $border;
+    color: $text_muted;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+
 /* ===== Progress bar ===== */
 QProgressBar {
     background-color: $surface_alt;

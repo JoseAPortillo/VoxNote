@@ -19,6 +19,8 @@ class MediaItem:
     alias: str
     added_at: str  # ISO-8601 timestamp captured when the entry was added
 
+    annotation: str = ""  # user note per file; old entries default to ""
+
     transcript_text: str | None = None
     transcript_lang: str | None = None
     transcript_segments: list | None = None

@@ -103,6 +103,10 @@ class MediaRepository:
         self._items[index].alias = alias.strip()
         self.save()
 
+    def update_annotation(self, index: int, annotation: str) -> None:
+        self._items[index].annotation = annotation
+        self.save()
+
     def remove(self, index: int) -> None:
         del self._items[index]
         self.save()

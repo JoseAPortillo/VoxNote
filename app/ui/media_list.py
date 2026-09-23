@@ -1,4 +1,4 @@
-"""The media registry widget: drag & drop, context menu, alias editing."""
+"""The media registry widget: drag & drop, context menu, alias & annotation editing."""
 
 from pathlib import Path
 
@@ -6,20 +6,38 @@ from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QHeaderView,
     QInputDialog,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QStyle,
+    QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 
 from app.core.config import SUPPORTED_EXTENSIONS
 from app.storage.repository import MediaRepository
 
 
-class MediaList(QListWidget):
-    """List of media entries backed by a :class:`MediaRepository`.
+class _NoEditDelegate(QStyledItemDelegate):
+    """Delegate that never creates an editor.
+
+    Installed on column 0 so double-clicking the file name does NOT start an
+    inline edit: the alias keeps being edited through the "Cambiar alias…"
+    dialog handled by :meth:`MediaList._on_item_double_clicked`.
+    """
+
+    def createEditor(self, parent, option, index):
+        return None
+
+
+class MediaList(QTreeWidget):
+    """Two-column table of media entries backed by a :class:`MediaRepository`.
+
+    Column 0 ("Archivo") shows the play icon + alias and only opens the alias
+    dialog on double click; column 1 ("Anotación") is edited inline and the
+    text is persisted per file via ``repository.update_annotation``.
 
     Signals:
         items_changed: emitted after any repository mutation.
@@ -34,52 +52,79 @@ class MediaList(QListWidget):
     def __init__(self, repository: MediaRepository, parent=None):
         super().__init__(parent)
         self.repository = repository
+        self._loading = False  # reload() guard: suppress itemChanged persistence
+        self.setColumnCount(2)
+        self.setHeaderLabels(["Archivo", "Anotación"])
+        self.setRootIsDecorated(False)
+        self.setIndentation(0)
+        self.setUniformRowHeights(True)
         self.setAcceptDrops(True)
         self.setDragEnabled(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
-        self.itemDoubleClicked.connect(self._edit_alias)
+        self.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.itemChanged.connect(self._on_item_changed)
+        # Column 0 must never open an inline editor (alias → dialog only).
+        self.setItemDelegateForColumn(0, _NoEditDelegate(self))
+        header = self.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.setColumnWidth(0, 300)
         self._icon_play = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
         self._icon_pause = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
 
     # -- public API ----------------------------------------------------------
     def reload(self) -> None:
-        self.clear()
-        for entry in self.repository.all():
-            item = QListWidgetItem(entry.alias)
-            item.setData(Qt.UserRole, entry.path)
-            item.setToolTip(f"{entry.path}\nAñadido: {entry.added_at}")
-            item.setIcon(self._icon_play)
-            self.addItem(item)
+        self._loading = True
+        try:
+            self.clear()
+            for entry in self.repository.all():
+                item = QTreeWidgetItem()
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsEditable
+                )
+                item.setData(0, Qt.UserRole, entry.path)
+                item.setText(0, entry.alias)
+                item.setIcon(0, self._icon_play)
+                item.setText(1, entry.annotation or "")
+                tooltip = f"{entry.path}\nAñadido: {entry.added_at}"
+                item.setToolTip(0, tooltip)
+                item.setToolTip(1, tooltip)
+                self.addTopLevelItem(item)
+        finally:
+            self._loading = False
 
     def selected_path(self) -> str | None:
         item = self.currentItem()
-        return item.data(Qt.UserRole) if item is not None else None
+        return item.data(0, Qt.UserRole) if item is not None else None
 
     def set_playing(self, path: str) -> None:
         """Flip the active row's icon to pause (playing)."""
         item = self._item_for_path(path)
         if item is not None:
-            item.setIcon(self._icon_pause)
+            item.setIcon(0, self._icon_pause)
 
     def set_stopped(self, path: str) -> None:
         """Restore the play icon on the row for ``path``."""
         item = self._item_for_path(path)
         if item is not None:
-            item.setIcon(self._icon_play)
+            item.setIcon(0, self._icon_play)
 
-    def _item_for_path(self, path: str) -> QListWidgetItem | None:
-        for row in range(self.count()):
-            item = self.item(row)
-            if item.data(Qt.UserRole) == path:
+    def _item_for_path(self, path: str) -> QTreeWidgetItem | None:
+        for row in range(self.topLevelItemCount()):
+            item = self.topLevelItem(row)
+            if item.data(0, Qt.UserRole) == path:
                 return item
         return None
 
     # -- icon click (playback) ------------------------------------------------
     def mouseReleaseEvent(self, event) -> None:
         """Emit :attr:`play_requested` when the left click lands on the row's
-        play/pause icon; anything else keeps the default list behavior."""
+        play/pause icon; anything else keeps the default view behavior."""
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
@@ -100,7 +145,7 @@ class MediaList(QListWidget):
                         opt.decorationSize.width(), opt.rect.height(),
                     )
                 if icon_rect.contains(pos):
-                    self.play_requested.emit(item.data(Qt.UserRole))
+                    self.play_requested.emit(item.data(0, Qt.UserRole))
                     event.accept()
                     return
         super().mouseReleaseEvent(event)
@@ -130,6 +175,26 @@ class MediaList(QListWidget):
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
         self.add_paths(paths)
 
+    # -- double click / inline editing ---------------------------------------
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        if column == 0:
+            # Alias → dialog (the _NoEditDelegate blocks inline editing here).
+            self._edit_alias(item)
+        elif column == 1:
+            # Reinforce the native inline edit start on the annotation cell.
+            self.editItem(item, 1)
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        """Persist the annotation when its inline edit is committed.
+
+        Ignored while ``reload()`` is rebuilding the rows (``_loading`` guard)
+        so loading never rewrites ``items.json``.
+        """
+        if column == 1 and not self._loading:
+            row = self.indexOfTopLevelItem(item)
+            if row >= 0:
+                self.repository.update_annotation(row, item.text(1))
+
     # -- context menu --------------------------------------------------------
     def _on_context_menu(self, pos) -> None:
         item = self.itemAt(pos)
@@ -143,22 +208,22 @@ class MediaList(QListWidget):
         if chosen is action_alias:
             self._edit_alias(item)
         elif chosen is action_copy:
-            QApplication.clipboard().setText(item.data(Qt.UserRole))
+            QApplication.clipboard().setText(item.data(0, Qt.UserRole))
         elif chosen is action_remove:
-            row = self.row(item)
+            row = self.indexOfTopLevelItem(item)
             self.repository.remove(row)
             self.reload()
             self.items_changed.emit()
 
-    def _edit_alias(self, item) -> None:
-        row = self.row(item)
+    def _edit_alias(self, item: QTreeWidgetItem) -> None:
+        row = self.indexOfTopLevelItem(item)
         alias, ok = QInputDialog.getText(
-            self, "Alias", "Alias para el archivo:", text=item.text(),
+            self, "Alias", "Alias para el archivo:", text=item.text(0),
         )
         alias = alias.strip() if ok else ""
-        if not alias or alias == item.text():
+        if not alias or alias == item.text(0):
             return
         self.repository.update_alias(row, alias)
-        item.setText(alias)
+        item.setText(0, alias)
         self.alias_changed.emit(row, alias)
         self.items_changed.emit()

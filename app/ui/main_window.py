@@ -71,7 +71,8 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.setSpacing(8)
         hint = QLabel(
-            "Arrastra vídeos o audios aquí · doble clic: alias · botón derecho: menú"
+            "Arrastra vídeos o audios aquí · doble clic en el nombre: alias · "
+            "doble clic en la anotación: editarla · botón derecho: menú"
         )
         hint.setObjectName("hintLabel")
         header.addWidget(hint)
