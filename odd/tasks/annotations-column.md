@@ -46,18 +46,27 @@ Todas las features de salida/playback/seek están cerradas; la lista es ahora el
 - Forecast < 400 líneas → single work-unit commit en `feature/annotations-column`.
 
 ## Checklist
-- [ ] T1: models: `MediaItem.annotation = ""` (default); repo: `update_annotation`
-- [ ] T2: media_list: MediaList → QTreeWidget 2 columnas (Archivo | Anotación), reload/select/play icon/context/dnd intactos
-- [ ] T3: media_list: edición inline columna 1 (doble clic → editItem; itemChanged → persistir con guard _loading)
-- [ ] T4: theme: QSS QTreeWidget/QHeaderView; main_window hint actualizado
-- [ ] T5: smokes offscreen + work-unit commit en feature branch
+- [x] T1: models: `MediaItem.annotation = ""` (default); repo: `update_annotation`
+- [x] T2: media_list: MediaList → QTreeWidget 2 columnas (Archivo | Anotación), reload/select/play icon/context/dnd intactos
+- [x] T3: media_list: edición inline columna 1 (doble clic → editItem; itemChanged → persistir con guard _loading)
+- [x] T4: theme: QSS QTreeWidget/QHeaderView; main_window hint actualizado
+- [x] T5: smokes offscreen + work-unit commit en feature branch
 
 ## Acceptance criteria
-- La lista muestra dos columnas: Archivo | Anotación, con cabeceras visibles.
-- Doble clic en la celda de anotación → edición inline; Enter/pérdida de foco guarda.
-- La anotación persiste en `items.json` por archivo y se restaura al recargar la lista.
-- El icono de play, el alias, el menú contextual, drag & drop y la selección funcionan igual que antes.
-- `items.json` viejos cargan sin cambios.
+- La lista muestra dos columnas: Archivo | Anotación, con cabeceras visibles. ✅
+- Doble clic en la celda de anotación → edición inline; Enter/pérdida de foco guarda. ✅ (itemChanged col 1 persiste; delegate col 0 bloquea inline)
+- La anotación persiste en `items.json` por archivo y se restaura al recargar la lista. ✅ (smoke 2 reload restore)
+- El icono de play, el alias, el menú contextual, drag & drop y la selección funcionan igual que antes. ✅ (smoke 3 play signal; alias vía diálogo)
+- `items.json` viejos cargan sin cambios. ✅ (smoke 1: `annotation == ""`)
 
 ## Verification evidence
-- (se rellena tras la implementación)
+- Work-unit commit: `feat: columna de anotaciones editable en la lista de medios` — SHA `26f35ac0e5110eb07d52c648ef17c446be1c0c44` (rama `feature/annotations-column`, 6 archivos, +195/−31; sin push, sin PR).
+- Todos los smokes con `QT_QPA_PLATFORM=offscreen` y TEMP `items.json` en `%LOCALAPPDATA%\Temp\opencode\annotations-smoke` (nunca `data/` real; verificado `git status data/` limpio).
+- Smoke 1 (models+repo): `MediaItem(**entry)` 3 campos → `annotation == ""`; `update_annotation` persiste; repo recargado lee el valor; entrada vieja al disco recarga con `""`. PASS
+- Smoke 2 (media_list): `columnCount()==2`, cabeceras "Archivo"/"Anotación"; item 0 col 1 texto; `setText(1, ...)` → `itemChanged` persiste; con `_loading=True` NO persiste ni en disco ni en memoria; `reload()` restaura anotación. PASS
+- Smoke 3 (icono play): `QSignalSpy(play_requested)` 1 emisión con el path correcto tras clic en zona del icono (fallback rect nulo `topLeft + (3,6)`). PASS
+- Smoke 4 (main_window+theme): import OK; stylesheet con `QTreeWidget` y `QHeaderView::section`; hint actualizado incluye alias y anotación. PASS
+- Smoke 5 (delegate): columna 0 `createEditor() is None` (inline bloqueado); col 1 default delegate crea editor (inline viable). PASS
+- Spot check orquestador (re-run): los 5 smokes re-ejecutados post-merge → ALL PASS.
+- RDD off (default): `gentle-ai review assess` main..feature/annotations-column → medium (executable_change app/core/models.py), 226 líneas, review_due=false (under_budget; informativo con RDD off, sin ceremonia).
+- Limite conocido (no cubierto offscreen): editor inline real con teclado/foco; comportamiento nativo Qt con `ItemIsEditable` + refuerzo `editItem`. Riesgo residual mínimo.
