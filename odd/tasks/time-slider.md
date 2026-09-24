@@ -51,7 +51,7 @@ Playback is the latest feature; seeking is its missing core interaction and a hi
 ## Verification evidence
 All smokes run with the repo venv (`.venv\Scripts\python.exe`, Python 3.14.3) and
 `QT_QPA_PLATFORM=offscreen`; media = temp 3 s WAV tone in
-`C:\Users\josea\AppData\Local\Temp\opencode\time-slider-smoke\` (outside the repo).
+una carpeta temporal fuera del repo.
 `data\items.json` SHA-256 identical before and after every smoke (never touched).
 
 - `smoke_slider.py` (click math, drag, signals): ALL PASS

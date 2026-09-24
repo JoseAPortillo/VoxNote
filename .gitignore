@@ -18,6 +18,9 @@ data/
 # Regenerable skill-registry cache
 .atl/.skill-registry.cache.json
 
+# Machine-local skill registry (paths to this user's home; regenerable)
+.atl/skill-registry.md
+
 # IDE
 .idea/
 .vscode/
