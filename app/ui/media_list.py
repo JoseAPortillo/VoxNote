@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -106,24 +106,71 @@ class _AnnotationEditorPopup(QFrame):
         super().closeEvent(event)
 
 
-class _NoEditDelegate(QStyledItemDelegate):
-    """Delegate that never creates an editor.
+class _PlayButtonDelegate(QStyledItemDelegate):
+    """Owns the leading cell of a media row: play/pause icon + active shade.
 
-    Installed on column 0 so double-clicking the file name does NOT start an
-    inline edit: the alias keeps being edited through the "Cambiar alias…"
-    dialog handled by :meth:`MediaList._on_item_double_clicked`.
+    It is the single source of truth for where the play button is painted, so
+    the click handler hits exactly what the user sees (no QSS sub-element
+    drift). While the row is playing/paused the whole cell gets a translucent
+    accent tint (pressed-state feedback) and the icon flips to pause.
+
+    Inline editing of column 0 is disabled here so double-clicking the alias
+    keeps going through the dialog (:meth:`MediaList._on_item_double_clicked`).
     """
+
+    # Icon placed like the QSS item padding did (10px left, 7px top).
+    ICON_OFFSET = QPoint(10, 7)
+    ICON_SIZE = QSize(16, 16)
+    # Horizontal room reserved for the icon so the alias text starts after it.
+    TEXT_INDENT = 30
+
+    def __init__(self, view: "MediaList", parent=None):
+        super().__init__(view)
+        self._view = view
+
+    def icon_rect(self, option: QStyleOptionViewItem) -> QRect:
+        """The exact rect where the play/pause icon is painted."""
+        return QRect(
+            option.rect.left() + self.ICON_OFFSET.x(),
+            option.rect.top() + self.ICON_OFFSET.y(),
+            self.ICON_SIZE.width(),
+            self.ICON_SIZE.height(),
+        )
 
     def createEditor(self, parent, option, index):
         return None
+
+    def paint(self, painter, option, index) -> None:
+        view = self._view
+        playing = view.is_playing_path(index.data(Qt.UserRole))
+        # 1) QSS background (hover/selection) + alias text, indented past the icon.
+        text_opt = QStyleOptionViewItem(option)
+        text_opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        text_opt.decorationSize = self.ICON_SIZE
+        text_opt.rect = text_opt.rect.adjusted(self.TEXT_INDENT, 0, 0, 0)
+        super().paint(painter, text_opt, index)
+        # 2) Active (pressed) shade over the whole cell, translucent accent.
+        if playing:
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            tint = QColor(view.palette().color(QPalette.ColorRole.Highlight))
+            tint.setAlpha(70)
+            painter.setBrush(tint)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(option.rect.adjusted(2, 2, -2, -2), 6, 6)
+            painter.restore()
+        # 3) Icon on top: pause while active, play otherwise.
+        icon = view._icon_pause if playing else view._icon_play
+        icon.paint(painter, self.icon_rect(option))
 
 
 class MediaList(QTreeWidget):
     """Two-column table of media entries backed by a :class:`MediaRepository`.
 
-    Column 0 ("Archivo") shows the play icon + alias and only opens the alias
-    dialog on double click; column 1 ("Anotación") opens a big multi-line popup
-    editor on click and the text is persisted per file via
+    Column 0 ("Archivo") renders a play/pause button (delegate-drawn icon +
+    pressed shade while active) and only opens the alias dialog on double
+    click; column 1 ("Anotación") opens a big multi-line popup editor on click
+    and the text is persisted per file via
     ``repository.update_annotation``.
 
     Signals:
@@ -155,8 +202,11 @@ class MediaList(QTreeWidget):
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.itemChanged.connect(self._on_item_changed)
-        # Column 0 must never open an inline editor (alias → dialog only).
-        self.setItemDelegateForColumn(0, _NoEditDelegate(self))
+        # Column 0 renders the play button through a delegate (icon + active
+        # shade) and never opens an inline editor (alias → dialog only).
+        self._play_delegate = _PlayButtonDelegate(self)
+        self.setItemDelegateForColumn(0, self._play_delegate)
+        self._playing_path: str | None = None
         header = self.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -176,7 +226,6 @@ class MediaList(QTreeWidget):
                 )
                 item.setData(0, Qt.UserRole, entry.path)
                 item.setText(0, entry.alias)
-                item.setIcon(0, self._icon_play)
                 item.setText(1, entry.annotation or "")
                 tooltip = f"{entry.path}\nAñadido: {entry.added_at}"
                 item.setToolTip(0, tooltip)
@@ -190,25 +239,23 @@ class MediaList(QTreeWidget):
         return item.data(0, Qt.UserRole) if item is not None else None
 
     def set_playing(self, path: str) -> None:
-        """Flip the active row's icon to pause (playing)."""
-        item = self._item_for_path(path)
-        if item is not None:
-            item.setIcon(0, self._icon_pause)
+        """Mark ``path`` as active: pause icon + pressed shade until stopped."""
+        self._playing_path = path
+        self.viewport().update()
 
     def set_stopped(self, path: str) -> None:
-        """Restore the play icon on the row for ``path``."""
-        item = self._item_for_path(path)
-        if item is not None:
-            item.setIcon(0, self._icon_play)
+        """Restore the normal row rendering for ``path``."""
+        if self._playing_path == path:
+            self._playing_path = None
+            self.viewport().update()
 
-    def _item_for_path(self, path: str) -> QTreeWidgetItem | None:
-        row = self._row_for_path(path)
-        return self.topLevelItem(row) if row >= 0 else None
+    def is_playing_path(self, path: str) -> bool:
+        return self._playing_path is not None and self._playing_path == path
 
     # -- icon click (playback) ------------------------------------------------
     def mouseReleaseEvent(self, event) -> None:
         """Emit :attr:`play_requested` when the left click lands on the row's
-        play/pause icon; anything else keeps the default view behavior."""
+        play/pause button; anything else keeps the default view behavior."""
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self.itemAt(pos)
@@ -216,19 +263,12 @@ class MediaList(QTreeWidget):
                 opt = QStyleOptionViewItem()
                 opt.initFrom(self)
                 opt.rect = self.visualItemRect(item)
-                opt.decorationSize = QSize(16, 16)
+                opt.decorationSize = _PlayButtonDelegate.ICON_SIZE
                 opt.features = QStyleOptionViewItem.ViewItemFeature.HasDecoration
-                icon_rect = self.style().subElementRect(
-                    QStyle.SubElement.SE_ItemViewItemDecoration, opt, self
-                )
-                if icon_rect.isEmpty():
-                    # Some styles (e.g. offscreen/common) return a null rect;
-                    # fall back to the leading cell where the icon is drawn.
-                    icon_rect = QRect(
-                        opt.rect.left(), opt.rect.top(),
-                        opt.decorationSize.width(), opt.rect.height(),
-                    )
-                if icon_rect.contains(pos):
+                # Hit zone = exactly the painted icon, with a little air around
+                # it so real clicks never miss.
+                hit_rect = self._play_delegate.icon_rect(opt).adjusted(-4, -4, 4, 4)
+                if hit_rect.contains(pos):
                     self.play_requested.emit(item.data(0, Qt.UserRole))
                     event.accept()
                     return
@@ -268,7 +308,7 @@ class MediaList(QTreeWidget):
     # -- double click / annotation popup editing -----------------------------
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         if column == 0:
-            # Alias → dialog (the _NoEditDelegate blocks inline editing here).
+            # Alias → dialog (the delegate disables inline editing here).
             self._edit_alias(item)
         elif column == 1:
             # Same popup as single click; the open guard prevents duplicates.
