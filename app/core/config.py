@@ -39,3 +39,7 @@ SUPPORTED_EXTENSIONS = {
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",
     ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".wma",
 }
+
+# Extensions that open the dedicated video playback window; everything else
+# in SUPPORTED_EXTENSIONS is treated as audio (main-window seek bar only).
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}

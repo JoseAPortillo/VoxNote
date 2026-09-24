@@ -256,6 +256,43 @@ QSlider::handle:horizontal {
 QSlider::handle:horizontal:hover { background: $accent_hover; }
 QSlider:disabled::handle:horizontal { background: $disabled; }
 
+/* ===== Video player window ===== */
+QWidget#videoPlayerWindow { background-color: $bg; }
+QWidget#videoControls { background-color: $surface; }
+QVideoWidget { background-color: #000000; }
+
+QPushButton#playButton {
+    background-color: $button_bg;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-width: 28px;
+    min-height: 20px;
+}
+QPushButton#playButton:hover { background-color: $hover; border-color: $border_hover; }
+QPushButton#playButton:pressed { background-color: $pressed; }
+/* Active (playing): accent surface; the icon is recolored white by the
+   window itself so it reads on the accent background. */
+QPushButton#playButton:checked {
+    background-color: $accent;
+    border-color: $accent;
+}
+QPushButton#playButton:checked:hover {
+    background-color: $accent_hover;
+    border-color: $accent_hover;
+}
+QPushButton#playButton:checked:pressed {
+    background-color: $accent_pressed;
+    border-color: $accent_pressed;
+}
+
+QLabel#videoTimeLabel {
+    color: $text_muted;
+    font-size: 12px;
+    font-family: "Consolas", "Cascadia Mono", "Courier New", monospace;
+    padding: 2px 4px;
+}
+
 /* ===== Output ===== */
 QPlainTextEdit, QTextEdit {
     background-color: $input_bg;

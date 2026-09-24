@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.config import DIARIZE_SPEAKERS, TRANSLATE_TARGET_LANG
+from app.core.config import DIARIZE_SPEAKERS, TRANSLATE_TARGET_LANG, VIDEO_EXTENSIONS
 from app.core.models import RunResult, TimedSegment
 from app.services.exporter import export as export_transcript
 from app.services.pipeline import Pipeline
@@ -28,6 +28,7 @@ from app.storage.repository import MediaRepository
 from app.ui.media_list import MediaList
 from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
+from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
 
 
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self._playing_path: str | None = None
         self._seeking = False
         self._duration_ms = 0
+        self.video_window: VideoPlayerWindow | None = None  # lazy; hidden, not deleted
 
         self._dark = load_dark_setting()
         app = QApplication.instance()
@@ -249,15 +251,35 @@ class MainWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     # -- media playback -------------------------------------------------------
+    @staticmethod
+    def _is_video(path: str) -> bool:
+        """True when ``path`` has a video extension (dedicated window)."""
+        return Path(path).suffix.lower() in VIDEO_EXTENSIONS
+
+    def _ensure_video_window(self) -> VideoPlayerWindow:
+        """Create the video window once and wire its signals."""
+        if self.video_window is not None:
+            return self.video_window
+        window = VideoPlayerWindow()
+        window.play_toggled.connect(self._on_video_play_toggled)
+        window.seek_released.connect(self._on_video_seek_released)
+        window.closed.connect(self._on_video_window_closed)
+        self.video_window = window
+        return window
+
     def _toggle_play(self, path: str) -> None:
-        """Play/pause the audio of ``path`` (audio-only, no video window)."""
+        """Play/pause ``path``; video files open the dedicated video window."""
         if self._playing_path == path:
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.player.pause()
                 self.status_label.setText("Reproducción pausada.")
+                if self._is_video(path):
+                    self._sync_video_window_state(False)
             else:
                 self.player.play()
                 self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+                if self._is_video(path):
+                    self._sync_video_window_state(True)
             return
         self._stop_playback(reset_status=False)
         self._playing_path = path
@@ -266,15 +288,71 @@ class MainWindow(QMainWindow):
         self._duration_ms = 0
         self.seek_slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
-        self.playback_bar.setVisible(True)
+        if self._is_video(path):
+            self._start_video(path)
+        else:
+            self.playback_bar.setVisible(True)
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self.player.play()
+            self.media_list.set_playing(path)
+            self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+
+    def _start_video(self, path: str) -> None:
+        """Route the shared player to the video window and start playback."""
+        window = self._ensure_video_window()
+        window.reset()
+        window.set_source_title(path)
+        self.player.setVideoOutput(window.video_widget)
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
         self.media_list.set_playing(path)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        # Desired state comes from the action, not playbackState(): this
+        # backend flips to PlayingState asynchronously after play().
+        window.set_playing_state(True)
         self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+
+    def _sync_video_window_state(self, playing: bool) -> None:
+        """Mirror the desired play state onto the window button (icon + checked)."""
+        if self.video_window is not None:
+            self.video_window.set_playing_state(playing)
+
+    def _on_video_play_toggled(self, checked: bool) -> None:
+        """The video window's button was clicked: toggle the shared player."""
+        path = self._playing_path
+        if path is None or not self._is_video(path):
+            # No video active in the window; reset its button to stopped.
+            if self.video_window is not None:
+                self.video_window.set_playing_state(False)
+            return
+        if checked:
+            self.player.play()
+            self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
+        else:
+            self.player.pause()
+            self.status_label.setText("Reproducción pausada.")
+        self.media_list.set_playing(path)
+        self._sync_video_window_state(checked)
+
+    def _on_video_seek_released(self, value_ms: int) -> None:
+        self.player.setPosition(value_ms)
+
+    def _on_video_window_closed(self) -> None:
+        """Titlebar X on the video window: stop playback for that source.
+
+        ``_stop_playback`` hides the window (hide() fires no closeEvent), so
+        this handler never re-enters through ``closed`` — no recursion guard
+        is needed beyond the state check.
+        """
+        if self._playing_path is not None and self._is_video(self._playing_path):
+            self._stop_playback()
 
     def _stop_playback(self, reset_status: bool = True) -> None:
         """Stop playback and restore the row's play icon. With
-        ``reset_status`` also clears the status label."""
+        ``reset_status`` also clears the status label. Any open video window
+        is hidden and reset so the audio path is unaffected."""
         if self._playing_path is None:
             return
         self.player.stop()
@@ -285,6 +363,9 @@ class MainWindow(QMainWindow):
         self.seek_slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
         self.playback_bar.setVisible(False)
+        if self.video_window is not None:
+            self.video_window.set_playing_state(False)
+            self.video_window.hide()
         if reset_status:
             self.status_label.setText("Listo.")
 
@@ -311,14 +392,21 @@ class MainWindow(QMainWindow):
     def _on_duration_changed(self, duration: int) -> None:
         self._duration_ms = duration
         self.seek_slider.setRange(0, duration)
-        self.playback_bar.setVisible(True)
+        # Video playback transports in its own window; the main bar stays
+        # hidden for videos (it reappears on the next audio source).
+        if self._playing_path is None or not self._is_video(self._playing_path):
+            self.playback_bar.setVisible(True)
         self._sync_time_label(self.seek_slider.value())
+        if self.video_window is not None:
+            self.video_window.set_duration(duration)
 
     def _on_position_changed(self, position: int) -> None:
         if self._seeking:
             return
         self.seek_slider.setValue(position)
         self._sync_time_label(position)
+        if self.video_window is not None:
+            self.video_window.update_position(position)
 
     def _on_seek_pressed(self) -> None:
         self._seeking = True
@@ -471,6 +559,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop_playback()
+        # No orphan top-level window: hide the (reusable) video window too,
+        # even when nothing was playing.
+        if self.video_window is not None:
+            self.video_window.hide()
         # The worker may already be gone after a completed run
         # (finished → deleteLater): a deleted C++ object raises RuntimeError,
         # which here simply means "no longer running".
