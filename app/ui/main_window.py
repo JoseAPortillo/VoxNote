@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
         self._last_run: RunResult | None = None
         self._active_pane: str = "transcript"  # pane receiving live segments
         self._running_path: str | None = None  # path persisted on done
+        self._scroll_sync_guard = False
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -110,12 +111,22 @@ class MainWindow(QMainWindow):
             "Etiqueta cada línea con su interlocutor ([Hablante N]) usando "
             "PyAnnote. Requiere HF_TOKEN en .env; la primera vez descarga el modelo."
         )
+        self.chk_scroll_sync = QCheckBox("Sincronizar scroll")
+        self.chk_scroll_sync.setAccessibleName(
+            "Sincronizar el desplazamiento vertical de transcripción y traducción"
+        )
+        self.chk_scroll_sync.setToolTip(
+            "Mantiene ambos paneles en la misma posición vertical proporcional."
+        )
+        self.chk_scroll_sync.setChecked(False)
+        self.chk_scroll_sync.setEnabled(False)
         self.btn_transcribe = QPushButton("Transcribir")
         self.btn_transcribe.setObjectName("primaryButton")
         self.btn_translate = QPushButton("Traducir")
         self.btn_save = QPushButton("Guardar TXT + SRT…")
         self.btn_save.setEnabled(False)
         buttons.addWidget(self.chk_diarize)
+        buttons.addWidget(self.chk_scroll_sync)
         buttons.addStretch(1)
         buttons.addWidget(self.btn_transcribe)
         buttons.addWidget(self.btn_translate)
@@ -168,6 +179,54 @@ class MainWindow(QMainWindow):
         column.addWidget(edit, stretch=1)
         return pane, edit
 
+    def _refresh_scroll_sync(self) -> None:
+        has_both_text = bool(
+            self.pane_transcript.toPlainText()
+            and self.pane_translation.toPlainText()
+        )
+        self.chk_scroll_sync.setEnabled(has_both_text)
+        if not has_both_text:
+            self.chk_scroll_sync.setChecked(False)
+
+    def _on_scroll_sync_toggled(self, checked: bool) -> None:
+        if checked:
+            # Align from the pane the user is currently viewing, not always
+            # from the transcript. This keeps the initial toggle intuitive
+            # when the translation was the last pane scrolled.
+            transcript_bar = self.pane_transcript.verticalScrollBar()
+            translation_bar = self.pane_translation.verticalScrollBar()
+            if abs(transcript_bar.value() / transcript_bar.maximum()) >= abs(
+                translation_bar.value() / translation_bar.maximum()
+            ):
+                source, target = self.pane_transcript, self.pane_translation
+            else:
+                source, target = self.pane_translation, self.pane_transcript
+            self._synchronize_scroll(source, target, source.verticalScrollBar().value())
+
+    def _synchronize_scroll(
+        self,
+        source: QPlainTextEdit,
+        target: QPlainTextEdit,
+        value: int,
+    ) -> None:
+        if (
+            not self.chk_scroll_sync.isChecked()
+            or not self.chk_scroll_sync.isEnabled()
+            or self._scroll_sync_guard
+            or self.pane_transcript.document().characterCount() <= 1
+            or self.pane_translation.document().characterCount() <= 1
+        ):
+            return
+        source_bar = source.verticalScrollBar()
+        target_bar = target.verticalScrollBar()
+        maximum = source_bar.maximum()
+        ratio = value / maximum if maximum > 0 else 0.0
+        self._scroll_sync_guard = True
+        try:
+            target_bar.setValue(round(ratio * target_bar.maximum()))
+        finally:
+            self._scroll_sync_guard = False
+
     def _connect_signals(self) -> None:
         self.media_list.items_changed.connect(self._refresh_buttons)
         self.media_list.itemSelectionChanged.connect(self._refresh_buttons)
@@ -182,6 +241,17 @@ class MainWindow(QMainWindow):
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
         self.btn_theme.clicked.connect(self._toggle_theme)
+        self.chk_scroll_sync.toggled.connect(self._on_scroll_sync_toggled)
+        self.pane_transcript.verticalScrollBar().valueChanged.connect(
+            lambda value: self._synchronize_scroll(
+                self.pane_transcript, self.pane_translation, value
+            )
+        )
+        self.pane_translation.verticalScrollBar().valueChanged.connect(
+            lambda value: self._synchronize_scroll(
+                self.pane_translation, self.pane_transcript, value
+            )
+        )
 
     # -- theme ---------------------------------------------------------------
     def _toggle_theme(self) -> None:
@@ -221,6 +291,7 @@ class MainWindow(QMainWindow):
         # Clear only the pane being produced; the other one keeps its content.
         active_pane = self.pane_transcript if pane == "transcript" else self.pane_translation
         active_pane.clear()
+        self._refresh_scroll_sync()
         self.progress.setValue(0)
         self.status_label.setText("Iniciando…")
         self._set_busy(True)
@@ -249,6 +320,7 @@ class MainWindow(QMainWindow):
         pane.appendPlainText(text)
         scrollbar = pane.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+        self._refresh_scroll_sync()
 
     # -- media playback -------------------------------------------------------
     @staticmethod
@@ -440,6 +512,7 @@ class MainWindow(QMainWindow):
                 transcript_lang=result.transcript_lang,
                 transcript_segments=result.transcript_segments,
             )
+        self._refresh_scroll_sync()
         lang = result.translation_lang or result.transcript_lang
         self.status_label.setText(f"Completado. Idioma detectado: {lang or '?'}.")
         self._set_busy(False)
@@ -471,6 +544,7 @@ class MainWindow(QMainWindow):
             self.pane_transcript.clear()
             self.pane_translation.clear()
             self._last_run = None
+            self._refresh_scroll_sync()
             return
         idx = self.repository.index_of(path)
         item = self.repository.get(idx) if idx is not None else None
@@ -493,6 +567,7 @@ class MainWindow(QMainWindow):
             self.pane_transcript.clear()
             self.pane_translation.clear()
             self._last_run = None
+        self._refresh_scroll_sync()
         self._refresh_buttons()
 
     def _on_failed(self, message: str) -> None:
@@ -556,6 +631,7 @@ class MainWindow(QMainWindow):
         self.btn_transcribe.setEnabled(not busy and has_selection)
         self.btn_translate.setEnabled(not busy and has_selection)
         self.btn_save.setEnabled(not busy and self._last_run is not None)
+        self._refresh_scroll_sync()
 
     def closeEvent(self, event) -> None:
         self._stop_playback()
