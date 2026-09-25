@@ -37,6 +37,7 @@ optional PyAnnote for speaker diarization. Validated on Windows with Python
 - Transcribe (original language) or translate (default target: Spanish — configurable)
 - Optional speaker diarization with `[Hablante N]` labels; it must be explicitly enabled and requires `HF_TOKEN`
 - Dual panes: original transcription + translation, persisted per file
+- Freely editable multiline notes in both panes, autosaved per media file
 - Opt-in proportional `Sincronizar scroll` checkbox, enabled when the selected file has both transcription and translation
 - Audio playback in the main window; video playback in a dedicated window with a video surface, play/pause, seek, and time display
 - Per-file aliases, annotations, original/translated text, and timestamped segments
@@ -71,14 +72,30 @@ Audio playback uses the main window, with a seek bar and elapsed/total time.
 Video files open a dedicated window with a video surface, play/pause, seek, and
 elapsed/total time controls.
 
+### Edit and export notes
+
+Both result panes are freely editable multiline documents. Changes autosave per
+selected media file, including an intentional empty pane, and are restored when
+you switch media or reopen the app. The original inference text and timestamped
+segments remain unchanged underneath the edited documents. If a new inference
+would replace edited text, the app asks for confirmation; a failed run keeps the
+notes.
+
+Use **Guardar texto editado…** to export the current documents as UTF-8 TXT with
+stable `TRANSCRIPCIÓN` and `TRADUCCIÓN` sections. **Guardar TXT + SRT…** remains
+the separate export for the original timestamped base output.
+
 ### Persist and export
 
 For each file, `data/items.json` stores its alias, annotation, original and
-translated text, language metadata, and timestamped segments with start/end
-times, text, and optional speaker labels. Selecting a file restores its stored
-original and translated panes; its alias and annotation remain visible in the
-list. **Guardar TXT + SRT…** writes timestamped TXT and SRT files. The dark/light
-theme choice is persisted through Qt settings and restored on the next launch.
+translated text, language metadata, timestamped segments with start/end times,
+text, and optional speaker labels. It also stores optional edited transcript
+and translation documents separately: a missing field means no edit, while an
+empty string records a deliberate clear. Selecting a file restores the edited
+panes when present, otherwise the original text. **Guardar TXT + SRT…** writes
+timestamped TXT and SRT files; **Guardar texto editado…** writes only the current
+edited documents. The dark/light theme choice is persisted through Qt settings
+and restored on the next launch.
 
 ## Hardware notes
 

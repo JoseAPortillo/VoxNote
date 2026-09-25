@@ -57,3 +57,35 @@ def export(
             handle.write(f"{segment.text}\n\n")
 
     return txt_path, srt_path
+
+
+def format_edited_text(transcript_text: str, translation_text: str) -> str:
+    """Build the standalone edited-document export.
+
+    The format intentionally has two stable sections so a later consumer can
+    find either pane without parsing timed cues::
+
+        TRANSCRIPCIÓN
+        ...
+
+        TRADUCCIÓN
+        ...
+
+    Both sections are always present, even when their text is intentionally
+    empty. The original timestamped ``export`` contract is unaffected.
+    """
+    return (
+        f"TRANSCRIPCIÓN\n{transcript_text}\n\n"
+        f"TRADUCCIÓN\n{translation_text}\n"
+    )
+
+
+def export_edited_text(
+    transcript_text: str,
+    translation_text: str,
+    path: str,
+) -> str:
+    """Write the current edited panes to a UTF-8 TXT file and return its path."""
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(format_edited_text(transcript_text, translation_text))
+    return path

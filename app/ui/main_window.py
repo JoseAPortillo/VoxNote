@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,7 +21,10 @@ from PySide6.QtWidgets import (
 
 from app.core.config import DIARIZE_SPEAKERS, TRANSLATE_TARGET_LANG, VIDEO_EXTENSIONS
 from app.core.models import RunResult, TimedSegment
-from app.services.exporter import export as export_transcript
+from app.services.exporter import (
+    export as export_transcript,
+    export_edited_text,
+)
 from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
@@ -30,6 +33,41 @@ from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
+
+
+class _EditableTextEdit(QPlainTextEdit):
+    """Plain-text editor that marks programmatic document replacements.
+
+    ``QPlainTextEdit.textChanged`` does not identify its source. The small
+    override lets the window distinguish its own ``setPlainText``/streaming
+    operations from edits made by the user, so restoring a run or a selected
+    media file cannot become an autosave.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._programmatic_change = False
+
+    @property
+    def programmatic_change(self) -> bool:
+        return self._programmatic_change
+
+    def setPlainText(self, text: str) -> None:
+        self._programmatic_change = True
+        try:
+            super().setPlainText(text)
+        finally:
+            self._programmatic_change = False
+
+    def appendPlainText(self, text: str) -> None:
+        self._programmatic_change = True
+        try:
+            super().appendPlainText(text)
+        finally:
+            self._programmatic_change = False
+
+    def clear(self) -> None:
+        self.setPlainText("")
 
 
 class MainWindow(QMainWindow):
@@ -46,6 +84,15 @@ class MainWindow(QMainWindow):
         self._running_path: str | None = None  # path persisted on done
         self._scroll_sync_guard = False
         self._scroll_sync_eligible = False
+
+        self._notes_programmatic_update = False
+        self._pending_note_saves: dict[str, tuple[str, str]] = {}
+        self._notes_save_timer = QTimer(self)
+        self._notes_save_timer.setSingleShot(True)
+        self._notes_save_timer.setInterval(500)
+        self._notes_save_timer.timeout.connect(self._flush_notes_autosave)
+        self._run_snapshot: tuple[str, str, RunResult | None] | None = None
+        self._run_sides: tuple[str, ...] = ()
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -76,7 +123,8 @@ class MainWindow(QMainWindow):
         header.setSpacing(8)
         hint = QLabel(
             "Arrastra vídeos o audios aquí · doble clic en el nombre: alias · "
-            "clic en la anotación: editarla · botón derecho: menú"
+            "clic en la anotación: editarla · edita los paneles libremente · "
+            "botón derecho: menú"
         )
         hint.setObjectName("hintLabel")
         header.addWidget(hint)
@@ -126,12 +174,15 @@ class MainWindow(QMainWindow):
         self.btn_translate = QPushButton("Traducir")
         self.btn_save = QPushButton("Guardar TXT + SRT…")
         self.btn_save.setEnabled(False)
+        self.btn_save_edited = QPushButton("Guardar texto editado…")
+        self.btn_save_edited.setEnabled(False)
         buttons.addWidget(self.chk_diarize)
         buttons.addWidget(self.chk_scroll_sync)
         buttons.addStretch(1)
         buttons.addWidget(self.btn_transcribe)
         buttons.addWidget(self.btn_translate)
         buttons.addWidget(self.btn_save)
+        buttons.addWidget(self.btn_save_edited)
         layout.addLayout(buttons)
 
         self.progress = QProgressBar()
@@ -160,25 +211,68 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
-    def _make_pane(self, title: str, placeholder: str) -> tuple[QWidget, QPlainTextEdit]:
-        """A labeled read-only text pane: header label over a text box.
-
-        Returns ``(column_widget, edit)``: the column goes into the layout,
-        the edit is kept so the window can route segments and restore text.
-        """
+    def _make_pane(
+        self, title: str, placeholder: str
+    ) -> tuple[QWidget, _EditableTextEdit]:
+        """Create a labeled, freely editable multiline text pane."""
         pane = QWidget()
         column = QVBoxLayout(pane)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
         header = QLabel(title)
         header.setObjectName("paneLabel")
-        edit = QPlainTextEdit()
-        edit.setReadOnly(True)
+        edit = _EditableTextEdit()
+        edit.setReadOnly(False)
         edit.setPlaceholderText(placeholder)
         edit.setAccessibleName(title)
         column.addWidget(header)
         column.addWidget(edit, stretch=1)
         return pane, edit
+
+    def _pane_for(self, side: str) -> _EditableTextEdit:
+        return self.pane_transcript if side == "transcript" else self.pane_translation
+
+    def _set_pane_text(self, side: str, text: str) -> None:
+        """Replace a pane without turning the replacement into a user edit."""
+        self._notes_programmatic_update = True
+        try:
+            self._pane_for(side).setPlainText(text)
+        finally:
+            self._notes_programmatic_update = False
+
+    def _on_pane_text_changed(self, side: str) -> None:
+        """Queue a debounced autosave for a real user edit."""
+        pane = self._pane_for(side)
+        if self._notes_programmatic_update or pane.programmatic_change:
+            return
+        path = self.media_list.selected_path()
+        if path is None:
+            return
+        self._pending_note_saves[side] = (path, pane.toPlainText())
+        self._notes_save_timer.start()
+        self._refresh_scroll_sync()
+
+    def _flush_notes_autosave(self) -> None:
+        """Persist pending edits, including empty strings, for their media."""
+        self._notes_save_timer.stop()
+        if not self._pending_note_saves:
+            return
+        pending = self._pending_note_saves
+        self._pending_note_saves = {}
+
+        by_path: dict[str, dict[str, str]] = {}
+        for side, (path, text) in pending.items():
+            by_path.setdefault(path, {})[side] = text
+
+        for path, values in by_path.items():
+            index = self.repository.index_of(path)
+            if index is None:
+                continue
+            self.repository.update_edited_text(
+                index,
+                transcript_text=values.get("transcript"),
+                translation_text=values.get("translation"),
+            )
 
     def _refresh_scroll_sync(self) -> None:
         has_both_text = self._scroll_sync_eligible and bool(
@@ -241,8 +335,15 @@ class MainWindow(QMainWindow):
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
+        self.btn_save_edited.clicked.connect(self._start_save_edited)
         self.btn_theme.clicked.connect(self._toggle_theme)
         self.chk_scroll_sync.toggled.connect(self._on_scroll_sync_toggled)
+        self.pane_transcript.textChanged.connect(
+            lambda: self._on_pane_text_changed("transcript")
+        )
+        self.pane_translation.textChanged.connect(
+            lambda: self._on_pane_text_changed("translation")
+        )
         self.pane_transcript.verticalScrollBar().valueChanged.connect(
             lambda value: self._synchronize_scroll(
                 self.pane_transcript, self.pane_translation, value
@@ -279,20 +380,54 @@ class MainWindow(QMainWindow):
     def _start_translate(self) -> None:
         self._run(self.pipeline.transcribe_and_translate, "translation")
 
+    @staticmethod
+    def _run_sides_for(pane: str) -> tuple[str, ...]:
+        return ("transcript", "translation") if pane == "translation" else ("transcript",)
+
+    def _confirm_replacing_notes(self, item, sides: tuple[str, ...]) -> bool:
+        fields = {
+            "transcript": "transcript_edited_text",
+            "translation": "translation_edited_text",
+        }
+        edited_sides = [side for side in sides if getattr(item, fields[side], None) is not None]
+        if not edited_sides:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Reemplazar texto editado",
+            "Hay texto editado en este medio. La nueva inferencia lo reemplazará "
+            "solo si termina correctamente. ¿Quieres continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _run(self, fn, pane: str) -> None:
+        self._flush_notes_autosave()
         path = self.media_list.selected_path()
         if path is None:
             QMessageBox.information(self, "Selección", "Selecciona un archivo de la lista.")
             return
+        index = self.repository.index_of(path)
+        item = self.repository.get(index) if index is not None else None
+        run_sides = self._run_sides_for(pane)
+        if item is not None and not self._confirm_replacing_notes(item, run_sides):
+            return
+
         self._stop_playback(reset_status=False)
         diarize = self.chk_diarize.isChecked()
         self._running_path = path
         self._active_pane = pane
+        self._run_sides = run_sides
+        self._run_snapshot = (
+            self.pane_transcript.toPlainText(),
+            self.pane_translation.toPlainText(),
+            self._last_run,
+        )
         self._scroll_sync_eligible = False
         self._last_run = None
         # Clear only the pane being produced; the other one keeps its content.
-        active_pane = self.pane_transcript if pane == "transcript" else self.pane_translation
-        active_pane.clear()
+        self._set_pane_text(pane, "")
         self._refresh_scroll_sync()
         self.progress.setValue(0)
         self.status_label.setText("Iniciando…")
@@ -318,8 +453,12 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _append_segment(self, text: str) -> None:
-        pane = self.pane_transcript if self._active_pane == "transcript" else self.pane_translation
-        pane.appendPlainText(text)
+        pane = self._pane_for(self._active_pane)
+        self._notes_programmatic_update = True
+        try:
+            pane.appendPlainText(text)
+        finally:
+            self._notes_programmatic_update = False
         scrollbar = pane.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         self._refresh_scroll_sync()
@@ -491,14 +630,66 @@ class MainWindow(QMainWindow):
         self._sync_time_label(self.seek_slider.value())
 
     # -- run results ----------------------------------------------------------
+    @staticmethod
+    def _stored_run_result(item) -> RunResult | None:
+        """Rebuild base-result metadata without losing empty values."""
+        fields = (
+            "transcript_text",
+            "transcript_lang",
+            "transcript_segments",
+            "translation_text",
+            "translation_lang",
+            "translation_segments",
+        )
+        if all(getattr(item, name, None) is None for name in fields):
+            return None
+        return RunResult(
+            transcript_text=item.transcript_text or "",
+            transcript_lang=item.transcript_lang or "",
+            transcript_segments=(
+                [TimedSegment.from_dict(d) for d in item.transcript_segments]
+                if item.transcript_segments is not None
+                else None
+            ),
+            translation_text=item.translation_text or "",
+            translation_lang=item.translation_lang or "",
+            translation_segments=(
+                [TimedSegment.from_dict(d) for d in item.translation_segments]
+                if item.translation_segments is not None
+                else None
+            ),
+        )
+
+    def _clear_successful_run_notes(self, path: str | None, sides: tuple[str, ...]) -> None:
+        """Clear replaced note fields only after a successful inference."""
+        if path is None:
+            return
+        index = self.repository.index_of(path)
+        if index is None:
+            return
+        item = self.repository.get(index)
+        fields = {
+            "transcript": "transcript_edited_text",
+            "translation": "translation_edited_text",
+        }
+        if not any(getattr(item, fields[side], None) is not None for side in sides):
+            return
+        self.repository.clear_edited_text(
+            index,
+            transcript="transcript" in sides,
+            translation="translation" in sides,
+        )
+
     def _on_done(self, result: RunResult) -> None:
         self._last_run = result
-        if result.translation_text:
+        running_path = self._running_path
+        run_sides = self._run_sides or self._run_sides_for(self._active_pane)
+
+        if self._active_pane == "translation":
             # Translate produced both sides: original left, translation right.
             # Persist both so a later selection restores the original too.
-            self.pane_translation.setPlainText(result.translation_text)
-            if result.transcript_text:
-                self.pane_transcript.setPlainText(result.transcript_text)
+            self._set_pane_text("transcript", result.transcript_text)
+            self._set_pane_text("translation", result.translation_text)
             self._persist_results(
                 transcript_text=result.transcript_text,
                 transcript_lang=result.transcript_lang,
@@ -508,18 +699,25 @@ class MainWindow(QMainWindow):
                 translation_segments=result.translation_segments,
             )
         else:
-            self.pane_transcript.setPlainText(result.transcript_text)
+            self._set_pane_text("transcript", result.transcript_text)
             self._persist_results(
                 transcript_text=result.transcript_text,
                 transcript_lang=result.transcript_lang,
                 transcript_segments=result.transcript_segments,
             )
+
+        # The note fields are deliberately cleared only now, after the worker
+        # has produced a result successfully.
+        self._clear_successful_run_notes(running_path, run_sides)
         self._scroll_sync_eligible = bool(
-            result.transcript_text and result.translation_text
+            self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
         )
         self._refresh_scroll_sync()
         lang = result.translation_lang or result.transcript_lang
         self.status_label.setText(f"Completado. Idioma detectado: {lang or '?'}.")
+        self._running_path = None
+        self._run_snapshot = None
+        self._run_sides = ()
         self._set_busy(False)
 
     def _persist_results(self, **fields) -> None:
@@ -543,47 +741,56 @@ class MainWindow(QMainWindow):
         self.repository.update_results(idx, **payload)
 
     def _on_selection_changed(self) -> None:
-        """Restore the persisted results of the selected item, or clear panes."""
+        """Restore edited notes over the original base results, if present."""
+        self._flush_notes_autosave()
         path = self.media_list.selected_path()
         self._scroll_sync_eligible = False
         if path is None:
-            self.pane_transcript.clear()
-            self.pane_translation.clear()
+            self._set_pane_text("transcript", "")
+            self._set_pane_text("translation", "")
             self._last_run = None
             self._refresh_scroll_sync()
+            self._refresh_buttons()
             return
         idx = self.repository.index_of(path)
         item = self.repository.get(idx) if idx is not None else None
-        if item is not None and (item.transcript_text or item.translation_text):
-            self.pane_transcript.setPlainText(item.transcript_text or "")
-            self.pane_translation.setPlainText(item.translation_text or "")
-            self._last_run = RunResult(
-                transcript_text=item.transcript_text or "",
-                transcript_lang=item.transcript_lang or "",
-                transcript_segments=[
-                    TimedSegment.from_dict(d) for d in item.transcript_segments
-                ] if item.transcript_segments else None,
-                translation_text=item.translation_text or "",
-                translation_lang=item.translation_lang or "",
-                translation_segments=[
-                    TimedSegment.from_dict(d) for d in item.translation_segments
-                ] if item.translation_segments else None,
+        if item is not None:
+            transcript_text = (
+                item.transcript_edited_text
+                if item.transcript_edited_text is not None
+                else item.transcript_text or ""
             )
+            translation_text = (
+                item.translation_edited_text
+                if item.translation_edited_text is not None
+                else item.translation_text or ""
+            )
+            self._set_pane_text("transcript", transcript_text)
+            self._set_pane_text("translation", translation_text)
+            self._last_run = self._stored_run_result(item)
         else:
-            self.pane_transcript.clear()
-            self.pane_translation.clear()
+            self._set_pane_text("transcript", "")
+            self._set_pane_text("translation", "")
             self._last_run = None
         self._scroll_sync_eligible = bool(
-            item is not None
-            and item.transcript_text
-            and item.translation_text
+            self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
         )
         self._refresh_scroll_sync()
         self._refresh_buttons()
 
     def _on_failed(self, message: str) -> None:
-        self._scroll_sync_eligible = False
+        if self._run_snapshot is not None:
+            transcript_text, translation_text, last_run = self._run_snapshot
+            self._set_pane_text("transcript", transcript_text)
+            self._set_pane_text("translation", translation_text)
+            self._last_run = last_run
+        self._scroll_sync_eligible = bool(
+            self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
+        )
         self._refresh_scroll_sync()
+        self._running_path = None
+        self._run_snapshot = None
+        self._run_sides = ()
         self._set_busy(False)
         self.status_label.setText("Error.")
         QMessageBox.critical(self, "Error", message)
@@ -635,8 +842,49 @@ class MainWindow(QMainWindow):
             return
         self.status_label.setText(f"Guardado: {base}.txt + .srt")
 
+    def _suggested_edited_save_path(self) -> str:
+        source = self.media_list.selected_path()
+        if source:
+            media_path = Path(source)
+            default_dir = str(media_path.parent)
+            stem = media_path.stem
+        else:
+            default_dir = str(Path.home())
+            stem = "transcripcion"
+        return str(Path(default_dir) / f"{stem}.edited.txt")
+
+    def _start_save_edited(self) -> None:
+        if self.media_list.selected_path() is None:
+            return
+        captured, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Guardar texto editado como…",
+            self._suggested_edited_save_path(),
+            "Texto (*.txt)",
+        )
+        if not captured:
+            return
+        txt_path = Path(captured)
+        if txt_path.suffix.lower() != ".txt":
+            txt_path = txt_path.with_suffix(".txt")
+        try:
+            export_edited_text(
+                self.pane_transcript.toPlainText(),
+                self.pane_translation.toPlainText(),
+                str(txt_path),
+            )
+        except Exception as exc:
+            self.status_label.setText("Error al guardar.")
+            QMessageBox.critical(
+                self, "Error", f"No se pudo guardar el texto editado.\n\n{exc}"
+            )
+            return
+        self.status_label.setText(f"Guardado: {txt_path}")
+
     def _set_busy(self, busy: bool) -> None:
         self.media_list.setEnabled(not busy)
+        self.pane_transcript.setEnabled(not busy)
+        self.pane_translation.setEnabled(not busy)
         self._refresh_buttons(busy)
 
     def _refresh_buttons(self, busy: bool = False) -> None:
@@ -644,9 +892,11 @@ class MainWindow(QMainWindow):
         self.btn_transcribe.setEnabled(not busy and has_selection)
         self.btn_translate.setEnabled(not busy and has_selection)
         self.btn_save.setEnabled(not busy and self._last_run is not None)
+        self.btn_save_edited.setEnabled(not busy and has_selection)
         self._refresh_scroll_sync()
 
     def closeEvent(self, event) -> None:
+        self._flush_notes_autosave()
         self._stop_playback()
         # No orphan top-level window: hide the (reusable) video window too,
         # even when nothing was playing.
