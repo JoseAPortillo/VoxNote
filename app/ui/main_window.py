@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self._active_pane: str = "transcript"  # pane receiving live segments
         self._running_path: str | None = None  # path persisted on done
         self._scroll_sync_guard = False
+        self._scroll_sync_eligible = False
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -180,7 +181,7 @@ class MainWindow(QMainWindow):
         return pane, edit
 
     def _refresh_scroll_sync(self) -> None:
-        has_both_text = bool(
+        has_both_text = self._scroll_sync_eligible and bool(
             self.pane_transcript.toPlainText()
             and self.pane_translation.toPlainText()
         )
@@ -287,6 +288,7 @@ class MainWindow(QMainWindow):
         diarize = self.chk_diarize.isChecked()
         self._running_path = path
         self._active_pane = pane
+        self._scroll_sync_eligible = False
         self._last_run = None
         # Clear only the pane being produced; the other one keeps its content.
         active_pane = self.pane_transcript if pane == "transcript" else self.pane_translation
@@ -512,6 +514,9 @@ class MainWindow(QMainWindow):
                 transcript_lang=result.transcript_lang,
                 transcript_segments=result.transcript_segments,
             )
+        self._scroll_sync_eligible = bool(
+            result.transcript_text and result.translation_text
+        )
         self._refresh_scroll_sync()
         lang = result.translation_lang or result.transcript_lang
         self.status_label.setText(f"Completado. Idioma detectado: {lang or '?'}.")
@@ -540,6 +545,7 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self) -> None:
         """Restore the persisted results of the selected item, or clear panes."""
         path = self.media_list.selected_path()
+        self._scroll_sync_eligible = False
         if path is None:
             self.pane_transcript.clear()
             self.pane_translation.clear()
@@ -567,10 +573,17 @@ class MainWindow(QMainWindow):
             self.pane_transcript.clear()
             self.pane_translation.clear()
             self._last_run = None
+        self._scroll_sync_eligible = bool(
+            item is not None
+            and item.transcript_text
+            and item.translation_text
+        )
         self._refresh_scroll_sync()
         self._refresh_buttons()
 
     def _on_failed(self, message: str) -> None:
+        self._scroll_sync_eligible = False
+        self._refresh_scroll_sync()
         self._set_busy(False)
         self.status_label.setText("Error.")
         QMessageBox.critical(self, "Error", message)

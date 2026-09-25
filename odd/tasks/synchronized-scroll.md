@@ -49,5 +49,6 @@ Los dos paneles se muestran lado a lado, pero actualmente cada scrollbar es inde
 - Smoke real offscreen con `QApplication` y `MainWindow`: PASS; textos con longitudes distintas, sincronización en ambos sentidos, alineación inicial desde el panel activo, desactivación, guarda de realimentación y estado incompleto.
 - `git diff --check`: PASS.
 - `gentle-ai review assess --cwd <repo> --json`: `high` por archivos untracked sin inventario explícito; requiere el preflight nativo y no representa un fallo de la implementación.
-- Commit de trabajo: pendiente.
-- Reversión: eliminar el checkbox, las conexiones y helpers de `app/ui/main_window.py`, y este documento; no afecta persistencia ni contenido.
+- Commit de trabajo: `373564f` (`feat(ui): synchronize transcript scroll panes`).
+- Revisión nativa: el candidato fue aceptado para revisión, pero el lens `review-reliability` no pudo ejecutarse porque el transporte del proveedor rechazó la tarea; se registró `provider_task_unavailable` y la transacción terminó en `unachievable_lens_slot`. No se высок pretending que la revisión pasó.
+- Reversión: revertir `373564f`; no afecta persistencia ni contenido.
