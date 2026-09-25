@@ -31,8 +31,8 @@ TRANSLATE_TARGET_LANG = os.getenv("TRANSLATE_TARGET_LANG", "es")  # Argos code
 # HF_TOKEN: token gratuito de Hugging Face (requerido para descargar el modelo
 # gated de PyAnnote; la licencia debe aceptarse en huggingface.co/pyannote/...).
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-# Marca por defecto del checkbox "Separar hablantes" en la interfaz.
-DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "true").lower() == "true"
+# Estado por defecto de la casilla "Separar hablantes"; la diarización es opcional.
+DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "false").lower() == "true"
 
 # Media ----------------------------------------------------------------------
 SUPPORTED_EXTENSIONS = {

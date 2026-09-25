@@ -1,10 +1,11 @@
 # Transcript — Local audio/video transcription & translation
 
 A desktop app (Python + PySide6) that transcribes and translates audio/video
-files **entirely on your machine** — no cloud, no uploads. It uses
+files on the local machine. Transcription, translation, and optional speaker
+diarization run locally, and media files are never uploaded. It uses
 faster-whisper for transcription, Argos Translate for translation, and
-optional PyAnnote speaker diarization. Validated on Windows with Python 3.14
-and NVIDIA CUDA.
+optional PyAnnote for speaker diarization. Validated on Windows with Python
+3.14 and NVIDIA CUDA.
 
 ## Quick path
 
@@ -34,12 +35,50 @@ and NVIDIA CUDA.
 
 - Drag & drop media files (mp4, mkv, webm, mov, avi, m4v, mp3, wav, m4a, flac, ogg, aac, opus, wma)
 - Transcribe (original language) or translate (default target: Spanish — configurable)
-- Optional speaker diarization (`[Speaker N]` per line)
+- Optional speaker diarization with `[Hablante N]` labels; it must be explicitly enabled and requires `HF_TOKEN`
 - Dual panes: original transcription + translation, persisted per file
+- Opt-in proportional `Sincronizar scroll` checkbox, enabled when the selected file has both transcription and translation
+- Audio playback in the main window; video playback in a dedicated window with a video surface, play/pause, seek, and time display
+- Per-file aliases, annotations, original/translated text, and timestamped segments
 - Save results as TXT + SRT with timestamps
-- Audio playback with a seek bar (play/pause per row)
-- Per-file annotations (click the annotation cell to edit in a popup)
-- Dark / light theme toggle
+- Dark / light theme toggle; the preference persists across launches
+
+## Using the app
+
+### Add and organize files
+
+Drag and drop supported media into the list. Double-click a file name, or use
+the context menu, to edit its alias. Click the annotation cell to open a
+multi-line annotation popup: `Ctrl+Enter` saves and closes it, `Esc` cancels
+without saving, and clicking outside auto-saves. Right-click a file for
+`Cambiar alias…`, `Copiar ruta`, and `Eliminar de la lista`.
+
+### Transcribe, translate, and diarize
+
+Use **Transcribe** for the original language or **Translate** to fill both
+panes. `Separar hablantes` is unchecked by default (`DIARIZE_SPEAKERS=false`).
+Diarization is opt-in: enable it explicitly and set `HF_TOKEN`. When enabled,
+grouped output uses the `[Hablante N]` label.
+
+### Compare results and play media
+
+The original transcription and translation remain in separate panes. The
+unchecked-by-default `Sincronizar scroll` checkbox synchronizes their vertical
+positions proportionally; it is available only when the selected file has both
+transcription and translation.
+
+Audio playback uses the main window, with a seek bar and elapsed/total time.
+Video files open a dedicated window with a video surface, play/pause, seek, and
+elapsed/total time controls.
+
+### Persist and export
+
+For each file, `data/items.json` stores its alias, annotation, original and
+translated text, language metadata, and timestamped segments with start/end
+times, text, and optional speaker labels. Selecting a file restores its stored
+original and translated panes; its alias and annotation remain visible in the
+list. **Guardar TXT + SRT…** writes timestamped TXT and SRT files. The dark/light
+theme choice is persisted through Qt settings and restored on the next launch.
 
 ## Hardware notes
 
@@ -59,34 +98,49 @@ and NVIDIA CUDA.
 | `WHISPER_COMPUTE_TYPE` | `auto` | `auto` \| `int8` \| `float16` \| `float32` |
 | `WHISPER_BEAM_SIZE` | `5` | Beam search width |
 | `TRANSLATE_TARGET_LANG` | `es` | Argos output language code |
-| `HF_TOKEN` | *(empty)* | Hugging Face token for speaker diarization (optional) |
-| `DIARIZE_SPEAKERS` | `true` | Default state of the "Separar hablantes" checkbox |
+| `HF_TOKEN` | *(empty)* | Hugging Face token required when speaker diarization is enabled |
+| `DIARIZE_SPEAKERS` | `false` | Default state of the "Separar hablantes" checkbox; diarization is opt-in and requires `HF_TOKEN` when enabled |
 
-## Speaker diarization (optional)
+An existing value in `.env` takes precedence over the code default.
 
-The PyAnnote model is **gated** — it requires a free Hugging Face account:
+## Speaker diarization (opt-in)
+
+Speaker diarization is disabled by default: `DIARIZE_SPEAKERS` is `false`, and
+the **Separar hablantes** checkbox must be enabled explicitly. Enabling it
+requires `HF_TOKEN`.
+
+The PyAnnote model is **gated** and requires a free Hugging Face account:
 
 1. Create an account at <https://huggingface.co>.
 2. Accept the model license: <https://huggingface.co/pyannote/speaker-diarization-3.1>.
 3. Create a token at <https://huggingface.co/settings/tokens>.
 4. Add it to your `.env`: `HF_TOKEN=hf_...`
 
-Without a token the rest of the app works normally; enabling diarization shows a
-clear error with these steps.
+When enabled, grouped output uses the `[Hablante N]` label. Without a token the
+rest of the app works normally; enabling diarization shows a clear error with
+these steps.
 
 ## First run notes
 
-- Models download automatically on first use (internet required): whisper
-  `large-v3-turbo` (~1.6 GB), the Argos translation pair, and the PyAnnote
-  diarization model. Subsequent runs are fully offline.
-- `data/` (your media list) and `.env` (your token) stay local and are
-  git-ignored — nothing is shared with the repository.
+The first use may require internet access to download resources that are not
+already cached:
+
+- faster-whisper may download the configured Whisper model (`large-v3-turbo`,
+  ~1.6 GB by default).
+- Argos may update its package index and download the requested source-to-target
+  language pair.
+- PyAnnote may download its gated diarization model when diarization is enabled.
+
+After the required resources are cached, transcription, translation, and
+diarization run locally. `data/` (your media list) and `.env` (your token) stay
+local and are git-ignored — nothing is shared with the repository.
 
 ## Privacy
 
-Everything runs locally. Media files are never uploaded; the only external
-communication is model downloads from Hugging Face (and only when a model is
-still missing).
+Processing and media files stay local. The app does not upload media or send it
+to a cloud service. Network access is limited to first-use resource retrieval:
+the faster-whisper model, Argos's package index and language pair, and the
+PyAnnote model when diarization is enabled. Cached resources are used locally.
 
 ## Troubleshooting
 
