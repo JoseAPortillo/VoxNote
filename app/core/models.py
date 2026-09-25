@@ -9,10 +9,10 @@ from pathlib import Path
 class MediaItem:
     """A media file registered in the working list.
 
-    Result fields (``transcript_*`` / ``translation_*``) are optional and
-    persisted per file. They all default to None so old ``items.json`` entries
-    that only carry ``path``/``alias``/``added_at`` still load via
-    ``MediaItem(**entry)``.
+    Result fields (``transcript_*`` / ``translation_*``) and edited-document
+    fields are optional and persisted per file. They all default to None so old
+    ``items.json`` entries that only carry ``path``/``alias``/``added_at`` still
+    load via ``MediaItem(**entry)``.
     """
 
     path: str
@@ -27,6 +27,11 @@ class MediaItem:
     translation_text: str | None = None
     translation_lang: str | None = None
     translation_segments: list | None = None
+
+    # User-edited documents. ``None`` means no user edit exists; an empty
+    # string is a deliberate edit that removes all text from that pane.
+    transcript_edited_text: str | None = None
+    translation_edited_text: str | None = None
 
     @classmethod
     def from_path(cls, path: str) -> "MediaItem":

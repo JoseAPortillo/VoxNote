@@ -88,6 +88,45 @@ class MediaRepository:
                 setattr(item, name, value)
         self.save()
 
+    def update_edited_text(
+        self,
+        index: int,
+        *,
+        transcript_text: str | None = None,
+        translation_text: str | None = None,
+    ) -> None:
+        """Persist user-edited pane text without changing base results.
+
+        ``None`` means "do not update this side". An empty string is a real
+        user edit and is therefore stored, allowing a user to clear a pane.
+        """
+        item = self._items[index]
+        if transcript_text is not None:
+            item.transcript_edited_text = transcript_text
+        if translation_text is not None:
+            item.translation_edited_text = translation_text
+        self.save()
+
+    def clear_edited_text(
+        self,
+        index: int,
+        *,
+        transcript: bool = True,
+        translation: bool = True,
+    ) -> None:
+        """Remove edited-note state from the selected pane sides.
+
+        Base text, language metadata, and timed segments are intentionally
+        left untouched. This operation is used only after a successful run
+        replaces the corresponding result.
+        """
+        item = self._items[index]
+        if transcript:
+            item.transcript_edited_text = None
+        if translation:
+            item.translation_edited_text = None
+        self.save()
+
     def add(self, path: str) -> MediaItem:
         """Register a file; duplicate paths (case-insensitive) are ignored."""
         normalized = str(Path(path))
