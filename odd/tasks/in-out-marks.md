@@ -32,7 +32,7 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 ## Tareas
 - [x] T0: spike sin código de producción. Los timestamps son 0-based respecto al array recibido, así que sumar el offset es correcto. Ver [Evidencia](#evidencia). Quedan tres casos sin cubrir, que se cierran en T1 o con un medio real: códecs no-AAC, presencia de pista de vídeo, y rangos de más de 30 s.
 - [x] T1: `app/services/clipper.py` con decode por rango (seek hacia atrás y decodificación hacia adelante descartando hasta el punto exacto, **con guarda de 0.25 s antes del objetivo**). Selección del stream por el **objeto** `c.streams.audio[0]`, validando antes que haya al menos una pista de audio, con mensaje propio. `Pipeline` y `Transcriber` aceptan `ranges: list[tuple[float, float]] | None`, donde `None` significa archivo completo. Timestamps llevados a absolutos. Diarización acotada a los rangos, aunque **no** con `Inference.crop()`: ese método no existe en el pipeline. Ver [Evidencia](#evidencia).
-- [ ] T2: `MediaItem.marks: list | None` (`None` = no hay; lista de pares ordenada y sin solapes), operaciones en `MediaRepository`, carga retrocompatible de `items.json` intacta, y limpieza tras ejecución correcta.
+- [x] T2: `MediaItem.marks: list | None` (`None` = no hay; lista de pares ordenada y sin solapes), operaciones en `MediaRepository`, carga retrocompatible de `items.json` intacta, y limpieza tras ejecución correcta. Ver [Evidencia](#evidencia).
 - [ ] T3: `paintEvent` en `app/ui/seek_slider.py` para el sombreado, tira de marcas debajo con `{` y `}`, menú contextual (marcar inicio, marcar fin, quitar marcas, limpiar), y cableado de `seek_slider` y de `video_window.slider` al mismo modelo por medio seleccionado.
 - [ ] T4: verificación y documentación. `compileall`, smoke Qt offscreen, `git diff --check`, sección en `README.md` en inglés.
 
@@ -54,7 +54,8 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 - Rama: `feat/in-out-marks`, worktree `CODE_WORKS\Transcript-worktrees\marks`, base `main` en `42dc326`.
 - Ruta: **delegated direct** para la implementación; los cambios de comportamiento abarcan servicios, persistencia y los dos reproductores.
 - TDD: no hay suite de tests automatizados en el proyecto; se usarán checks funcionales offscreen.
-- Delivery: `ask-on-risk`; ningún task debe pasar de ~400 líneas.
+- Delivery: `exception-ok` con `size:exception` **aprobada por el mantenedor** (2026-09-26). Motivo: al cruzar T1 las 400 líneas authored y no existir todavía repositorio GitHub, los PRs encadenados no eran ejecutables. Se acepta superar el presupuesto y se sigue en commits de unidad de trabajo; cuando exista el repositorio se decidirá si el historial se divide.
+- Riesgo nativo del slice T1: `gentle-ai review assess` con `--base-ref 42dc326 --committed-only` da `medium` por `executable_change` en `app/services/clipper.py`, 5 rutas y 497 líneas, con `review_due: true` y motivo `slice_budget_reached`. La revisión nativa no se ejecuta todavía: el mantenedor la pospuso para después de la fase de pruebas, y el host no puede lanzar subagentes de revisión (política de tier del proveedor). El límite revisado sigue en `42dc326` para que la feature completa se revise como un único slice.
 
 ## Evidencia
 
@@ -107,3 +108,38 @@ El recorte se ancla en el `pts` del **primer frame resampleado**, no en el objet
 | `git diff --check` | limpio |
 
 **5. El resto queda igual**: `no_speech_threshold` intacto (un rango de silencio puede devolver 0 segmentos), la traducción sigue siendo por segmento y posterior, y `assign_speaker` no se toca. Pyannote puede devolver **turnos solapados** (interrupciones): el par `[32.860,34.500] SPEAKER_00` + `[32.995,33.417] SPEAKER_02` aparece igual en la ejecución completa, así que la regla de solape máximo sigue siendo la correcta.
+
+### T2 — persistencia y limpieza (cerrada)
+**Archivos**: `app/core/models.py`, `app/storage/repository.py`, `app/services/pipeline.py`. Sin tocar la UI, sin dependencias nuevas.
+
+**1. `normalize_marks()` es el único sitio donde se normaliza, y `None` nunca se convierte en `[]`.**
+La función de módulo recibe lo que el llamante juntó (posiciones del slider, una lista guardada, un `items.json` editado a mano) y devuelve pares `[inicio, fin]` **ordenados y sin solapes**, con los pares inválidos descartados. Devuelve `None` para `None`, para entrada vacía y para entrada enteramente inválida. Eso no es cosmético: los motores leen una lista de rangos **vacía** como "archivo completo", así que guardar `[]` convertiría "sin marcas" en "transcribe todo". Al no existir `[]` como estado almacenable, el contrato de T1 queda protegido por construcción. `MediaItem.__post_init__` la aplica en cada construcción, así que un `items.json` con marcas desordenadas o solapadas se autorrepara al cargar.
+
+**2. Un par tiene que ser una lista o una tupla de dos elementos, y el chequeo va antes de leer los valores.** Un string suelto es iterable, así que indexarlo convertía `"12"` en el rango `[1.0, 2.0]` en silencio: audio de la posición equivocada sin ningún error. `isinstance(pair, (list, tuple))` más `len(pair) == 2` corta eso antes de que llegue a `float()`.
+
+**3. Los pares se guardan como listas de `float`, no como tuplas.** `json.dumps` escribe una tupla como array y `json.loads` la devuelve como lista, así que guardar tuplas haría fallar la igualdad exacta del round-trip por un detalle de tipo. Los valores se castean a `float` para que el JSON sea homogéneo.
+
+**4. `MediaRepository.__init__` ya llamaba a `save()`** para dejar el archivo creado, así que construir el repositorio **sí** escribe. No es una migración destructiva: la comprobación 2b verificó que las 3 entradas del `items.json` real conservan todos sus campos y valores, y que lo único que se añade es `"marks": null`. `load()` en sí no toca el archivo (comprobación 2a, hash idéntico antes y después), que es lo que exige el criterio de aceptación.
+
+**5. La limpieza va en el `Pipeline`, con el repositorio inyectado por constructor.** `Pipeline(transcriber, target_lang, diarizer, repository=None)`. Al terminar bien, `_consume_marks()` llama a `clear_marks(index_of(path))`. Tres propiedades deliberadas:
+- **Solo limpia una ejecución que consumió marcas.** Con `ranges=None` (archivo completo) no se consumió ninguna, así que unas marcas existentes siguen describiendo lo que el usuario quiere acotar la próxima vez y se dejan. Por eso el `None` de `normalize_marks` importa también aquí.
+- **Nunca en la ruta de fallo.** La excepción de transcripción, decodificación o traducción se propaga antes de construir el resultado, así que las marcas sobreviven a una ejecución fallida y se pueden reintentar (comprobaciones 5h–5j: `FileNotFoundError` propagada y marcas intactas).
+- **`repository=None` no cambia nada.** Sin repositorio inyectado el pipeline se comporta exactamente como antes (comprobación 5n), así que T2 no altera el comportamiento de la app hasta que T3 cablee la inyección.
+
+**Pendiente para T3 (una línea, en la UI)**: `main_window.py:80` sigue construyendo `Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)`. Para que la limpieza ocurra en la app hace falta pasar el repositorio — `Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG, repository=self.repository)` — además de leer `item.marks` y pasarlo como `ranges`. Ambas cosas son cableado de UI, que es T3; la lógica ya está escrita y verificada en el servicio.
+
+**6. El hint de `ranges` dice `tuple` pero el storage produce `list`.** T1 anotó `list[tuple[float, float]] | None`; `normalize_marks` devuelve `list[list[float]]` porque es lo que sobrevive al round-trip por JSON. Los servicios solo hacen `for start, end in ranges`, así que ambos funcionan igual y no hay ningún fallo de comportamiento: es una imprecisión de tipos que conviene arreglar en T4 o en una pasada de limpieza, sin mezclarla aquí.
+
+**7. Verificación funcional** (Whisper tiny, `beam_size=1`, `HF_HUB_OFFLINE=1`; sin diarización real, con dobles de prueba):
+| Check | Resultado |
+| --- | --- |
+| `python -m compileall app` | PASS |
+| Retrocompatibilidad, `items.json` real de 3 entradas sin `marks` | PASS: no revienta, `marks is None` en las 3, `load()` deja el hash idéntico, y la construcción solo añade `"marks": null` sin perder ningún campo |
+| Round-trip con solapes, desorden, contacto e inválidos | PASS: `[[30,40],[10,20],[20,25],[35,45],[22,23],[99,99],["x",5],[5],"12",{"start":1,"end":2},[3,4]]` → `[[3.0,4.0],[10.0,25.0],[30.0,45.0]]`, idéntico en memoria, en disco y tras recargar |
+| Aislamiento entre medios | PASS: 3 medios, solo el destino marcado; sobrevive al round-trip; `clear_marks` de uno no toca los otros |
+| `clear_marks` sin marcas no escribe | PASS: hash del archivo sin cambios |
+| Limpieza tras ejecución correcta (real, 6 s del MKV real) | PASS: 2 segmentos absolutos `[22.50→25.30]`, `[25.30→28.30]`, idioma `en`; marcas `None` en memoria y en disco tras releer, y el segundo medio conserva las suyas |
+| La ejecución fallida no consume marcas | PASS: `FileNotFoundError` propagada, marcas intactas |
+| Ramas con y sin diarizar | PASS: la rama diarizada también limpia, y reenvía los mismos rangos a los dos motores |
+| Regresión sin marcas | PASS: el pipeline recibe `None` (no `[]`), el motor recibe la ruta sin recortar y los tiempos no llevan offset; una ejecución a archivo completo no borra marcas existentes |
+| `git diff --check` | limpio |

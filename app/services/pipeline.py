@@ -1,11 +1,14 @@
 """Orchestration of the transcription / translation workflows."""
 
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from app.core.models import RunResult, TimedSegment
 from app.services import translator as argos
 from app.services.diarizer import Diarizer, assign_speaker, speaker_index
 from app.services.transcriber import Transcriber, progress_total
+
+if TYPE_CHECKING:  # storage stays a UI-facing concern; only the type is needed
+    from app.storage.repository import MediaRepository
 
 
 Callback = Optional[Callable[[str], None]]
@@ -29,6 +32,14 @@ class Pipeline:
     timestamps absolute against the media, so an exported SRT still subtitles
     the original file. ``ranges=None`` means the whole file.
 
+    When a ``repository`` is supplied, a run that consumed marks clears them
+    once it succeeds: the marks existed to scope that run, so leaving them
+    behind would make the next transcription of the same media cover the
+    fragment just processed and nothing else. That lifecycle lives here, in
+    the run, instead of in the UI, because the marks are an input of the
+    execution rather than UI state to orchestrate. With no repository the
+    pipeline behaves exactly as before.
+
     Every entry point returns a :class:`RunResult`: ``transcribe`` fills the
     transcript side; ``transcribe_and_translate`` fills BOTH sides, with the
     transcript side holding the ORIGINAL (untranslated) lines/segments and the
@@ -42,10 +53,12 @@ class Pipeline:
         transcriber: Transcriber,
         target_lang: str = "es",
         diarizer: Diarizer | None = None,
+        repository: "MediaRepository | None" = None,
     ):
         self.transcriber = transcriber
         self.target_lang = target_lang
         self.diarizer = diarizer
+        self.repository = repository
 
     # -- public API ----------------------------------------------------------
 
@@ -59,10 +72,12 @@ class Pipeline:
         ranges: list[tuple[float, float]] | None = None,
     ) -> RunResult:
         if diarize:
-            return self._run_diarized(
+            result = self._run_diarized(
                 path, translate=False, ranges=ranges,
                 on_segment=on_segment, on_progress=on_progress, on_status=on_status,
             )
+            self._consume_marks(path, ranges)
+            return result
         if on_status:
             on_status(self._loading_status(ranges))
         self.transcriber.get_model()
@@ -82,11 +97,13 @@ class Pipeline:
                 on_segment(text)
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
-        return RunResult(
+        result = RunResult(
             transcript_text="\n".join(lines),
             transcript_lang=info.language,
             transcript_segments=timed,
         )
+        self._consume_marks(path, ranges)
+        return result
 
     def transcribe_and_translate(
         self,
@@ -98,10 +115,12 @@ class Pipeline:
         ranges: list[tuple[float, float]] | None = None,
     ) -> RunResult:
         if diarize:
-            return self._run_diarized(
+            result = self._run_diarized(
                 path, translate=True, ranges=ranges,
                 on_segment=on_segment, on_progress=on_progress, on_status=on_status,
             )
+            self._consume_marks(path, ranges)
+            return result
         if on_status:
             on_status(self._loading_status(ranges))
         self.transcriber.get_model()
@@ -135,7 +154,7 @@ class Pipeline:
                 on_segment(translated)
             if on_progress and total:
                 on_progress(segment.end / total * 100.0)
-        return RunResult(
+        result = RunResult(
             transcript_text="\n".join(orig_lines),
             transcript_lang=detected,
             transcript_segments=orig_timed,
@@ -143,8 +162,34 @@ class Pipeline:
             translation_lang=self.target_lang,
             translation_segments=timed,
         )
+        self._consume_marks(path, ranges)
+        return result
 
     # -- internal ------------------------------------------------------------
+
+    def _consume_marks(
+        self, path: str, ranges: list[tuple[float, float]] | None
+    ) -> None:
+        """Drop the marks that produced this run, now that it has succeeded.
+
+        Called by both public entry points, after the result exists and never
+        on the failure path: an exception during transcription, decoding or
+        translation propagates first, so the marks the user placed survive a
+        failed run and can be tried again.
+
+        Only a run that actually consumed marks clears them. A whole-file run
+        (``ranges=None``) used no marks, so any that exist still describe what
+        the user wants to scope next and are left in place. The shared
+        repository instance is the one the UI holds, so the file is written
+        once, from here, and the UI sees the cleared state without a second
+        save of its own.
+        """
+        if self.repository is None or not ranges:
+            return
+        index = self.repository.index_of(path)
+        if index is None:
+            return
+        self.repository.clear_marks(index)
 
     @staticmethod
     def _loading_status(ranges) -> str:

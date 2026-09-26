@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List
 
 from app.core.config import ITEMS_FILE
-from app.core.models import MediaItem
+from app.core.models import MediaItem, normalize_marks
 
 
 class MediaRepository:
@@ -125,6 +125,33 @@ class MediaRepository:
             item.transcript_edited_text = None
         if translation:
             item.translation_edited_text = None
+        self.save()
+
+    def update_marks(self, index: int, marks) -> None:
+        """Replace the in/out marks of the item at ``index`` and persist.
+
+        ``marks`` is any collection of ``[start, end]`` second pairs; it is
+        normalized (invalid pairs dropped, ordered, overlaps merged) before
+        being stored, so the caller can pass raw slider positions. An empty or
+        fully invalid selection is stored as ``None``, the same "no marks"
+        state as never having marked anything.
+        """
+        item = self._items[index]
+        item.marks = normalize_marks(marks)
+        self.save()
+
+    def clear_marks(self, index: int) -> None:
+        """Remove the in/out marks of the item at ``index`` and persist.
+
+        Used after a successful run, because those marks were the input of that
+        run: keeping them would scope the NEXT transcription of the same media
+        to the fragment just processed. Nothing else on the item is touched,
+        and an item without marks is left alone instead of rewriting the file.
+        """
+        item = self._items[index]
+        if item.marks is None:
+            return
+        item.marks = None
         self.save()
 
     def add(self, path: str) -> MediaItem:
