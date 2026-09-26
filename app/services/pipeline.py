@@ -5,7 +5,7 @@ from typing import Callable, Optional
 from app.core.models import RunResult, TimedSegment
 from app.services import translator as argos
 from app.services.diarizer import Diarizer, assign_speaker, speaker_index
-from app.services.transcriber import Transcriber
+from app.services.transcriber import Transcriber, progress_total
 
 
 Callback = Optional[Callable[[str], None]]
@@ -23,6 +23,11 @@ class Pipeline:
     (``[Hablante N]``). Diarization is offline: the speaker turns are computed
     before transcription starts, so the output stops streaming live while the
     diarization pass runs.
+
+    Both also accept ``ranges``, a list of ``(start, end)`` second pairs, to run
+    only over the marked parts of the media. The result is the same shape, with
+    timestamps absolute against the media, so an exported SRT still subtitles
+    the original file. ``ranges=None`` means the whole file.
 
     Every entry point returns a :class:`RunResult`: ``transcribe`` fills the
     transcript side; ``transcribe_and_translate`` fills BOTH sides, with the
@@ -51,17 +56,20 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
+        ranges: list[tuple[float, float]] | None = None,
     ) -> RunResult:
         if diarize:
             return self._run_diarized(
-                path, translate=False,
+                path, translate=False, ranges=ranges,
                 on_segment=on_segment, on_progress=on_progress, on_status=on_status,
             )
         if on_status:
-            on_status("Cargando modelo de voz…")
+            on_status(self._loading_status(ranges))
         self.transcriber.get_model()
-        segments, info = self.transcriber.transcribe_segments(path, task="transcribe")
-        total = info.duration or 0.0
+        segments, info = self.transcriber.transcribe_segments(
+            path, task="transcribe", ranges=ranges
+        )
+        total = progress_total(path, info, ranges)
         lines: list[str] = []
         timed: list[TimedSegment] = []
         for segment in segments:
@@ -87,22 +95,25 @@ class Pipeline:
         on_progress: ProgressCallback = None,
         on_status: Callback = None,
         diarize: bool = False,
+        ranges: list[tuple[float, float]] | None = None,
     ) -> RunResult:
         if diarize:
             return self._run_diarized(
-                path, translate=True,
+                path, translate=True, ranges=ranges,
                 on_segment=on_segment, on_progress=on_progress, on_status=on_status,
             )
         if on_status:
-            on_status("Cargando modelo de voz…")
+            on_status(self._loading_status(ranges))
         self.transcriber.get_model()
-        segments, info = self.transcriber.transcribe_segments(path, task="transcribe")
+        segments, info = self.transcriber.transcribe_segments(
+            path, task="transcribe", ranges=ranges
+        )
         detected = info.language
         if on_status:
             on_status(f"Preparando traducción {detected} → {self.target_lang}…")
         argos.ensure_language_pair(detected, self.target_lang)
 
-        total = info.duration or 0.0
+        total = progress_total(path, info, ranges)
         lines: list[str] = []
         timed: list[TimedSegment] = []
         # Keep the ORIGINAL (pre-translation) sides too: the app shows both
@@ -135,6 +146,18 @@ class Pipeline:
 
     # -- internal ------------------------------------------------------------
 
+    @staticmethod
+    def _loading_status(ranges) -> str:
+        if not ranges:
+            return "Cargando modelo de voz…"
+        return "Cargando modelo de voz para el tramo marcado…"
+
+    @staticmethod
+    def _diarizing_status(ranges) -> str:
+        if not ranges:
+            return "Analizando hablantes (diarización)…"
+        return "Analizando hablantes del tramo marcado (diarización)…"
+
     def _ensure_diarizer(self) -> Diarizer:
         if self.diarizer is None:
             from app.core.config import HF_TOKEN
@@ -149,17 +172,20 @@ class Pipeline:
         on_segment: Callback,
         on_progress: ProgressCallback,
         on_status: Callback,
+        ranges: list[tuple[float, float]] | None = None,
     ) -> RunResult:
         # Offline pass: who speaks when (slow on CPU, no live output yet).
         if on_status:
-            on_status("Analizando hablantes (diarización)…")
-        turns = self._ensure_diarizer().diarize(path)
+            on_status(self._diarizing_status(ranges))
+        turns = self._ensure_diarizer().diarize(path, ranges=ranges)
         labels = speaker_index(turns)
 
         if on_status:
-            on_status("Cargando modelo de voz…")
+            on_status(self._loading_status(ranges))
         self.transcriber.get_model()
-        segments, info = self.transcriber.transcribe_segments(path, task="transcribe")
+        segments, info = self.transcriber.transcribe_segments(
+            path, task="transcribe", ranges=ranges
+        )
         detected = info.language
 
         if translate:
@@ -167,7 +193,7 @@ class Pipeline:
                 on_status(f"Preparando traducción {detected} → {self.target_lang}…")
             argos.ensure_language_pair(detected, self.target_lang)
 
-        total = info.duration or 0.0
+        total = progress_total(path, info, ranges)
         lines: list[str] = []
         timed: list[TimedSegment] = []
         # Original sides (with the same speaker labels) for the transcript pane.

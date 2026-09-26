@@ -31,27 +31,86 @@ class Diarizer:
                 self._pipeline.to(torch.device("cuda"))
         return self._pipeline
 
-    def diarize(self, path: str):
+    #: Seconds of audio decoded on each side of a range before diarizing it.
+    #: The speaker clustering needs neighbouring speech to stay stable: a bare
+    #: 12 s range of the reference media came back with different speaker labels
+    #: and 2 turns instead of 5, while this margin reproduces a whole-file run
+    #: to within 30 ms.
+    RANGE_WARMUP = 15.0
+
+    def diarize(self, path: str, ranges: Optional[list[tuple[float, float]]] = None):
         """Return speaker turns as a list of ``(start, end, speaker_label)``.
 
         pyannote 4 wraps the classic ``Annotation`` in a ``DiarizeOutput``
         result object: use ``speaker_diarization`` to keep the same shape
         across versions.
+
+        ``ranges`` restricts the pass to the given ``(start, end)`` time ranges
+        in seconds. Turns come back already expressed in media time, so no
+        offset is added to them. Each range is diarized on its own: the silence
+        between two disjoint ranges is never fed to the models.
         """
         pipeline = self.get_pipeline()
+        if ranges:
+            return self._diarize_ranges(pipeline, path, ranges)
         file, temp_path = self._safe_input(path)
         try:
-            result = pipeline(file)
-            annotation = getattr(result, "speaker_diarization", None)
-            if annotation is None:
-                annotation = result  # fallback for pre-4 output (plain Annotation)
-            return [
-                (turn.start, turn.end, speaker)
-                for turn, _, speaker in annotation.itertracks(yield_label=True)
-            ]
+            return self._tracks(pipeline(file))
         finally:
             if temp_path is not None:
                 os.remove(temp_path)
+
+    def _diarize_ranges(self, pipeline, path: str, ranges):
+        """Diarize each range on its own and return the turns it contains.
+
+        The ``SpeakerDiarization`` pipeline of pyannote 4 does not expose
+        ``crop``: only the raw ``Inference`` behind it has that method, and
+        calling it would return features instead of clustered turns. So the
+        range is decoded with the clipper and handed over as a waveform, which
+        the pipeline accepts directly and which keeps the reader that
+        ``_safe_input`` works around (torchcodec) out of the picture. The models
+        want 16 kHz mono, exactly what ``decode_range`` produces.
+        """
+        import torch
+
+        from app.services.clipper import SAMPLE_RATE, decode_range, duration
+
+        total = duration(path)
+        turns: list[tuple[float, float, str]] = []
+        for start, end in ranges:
+            low = max(0.0, start - self.RANGE_WARMUP)
+            high = end + self.RANGE_WARMUP
+            if total:
+                high = min(high, total)
+            audio = decode_range(path, low, high)
+            if audio.size == 0:
+                continue
+            result = pipeline(
+                {
+                    "waveform": torch.from_numpy(audio).unsqueeze(0),
+                    "sample_rate": SAMPLE_RATE,
+                }
+            )
+            # The pipeline sees a waveform with no idea of where it came from,
+            # so its turns start at zero. Shift them back into media time and
+            # trim to the range the caller asked for, dropping the margin.
+            for turn_start, turn_end, speaker in self._tracks(result):
+                begin = max(start, low + turn_start)
+                finish = min(end, low + turn_end)
+                if finish > begin:
+                    turns.append((begin, finish, speaker))
+        return turns
+
+    @staticmethod
+    def _tracks(result):
+        """``(start, end, speaker)`` triples of a pyannote result object."""
+        annotation = getattr(result, "speaker_diarization", None)
+        if annotation is None:
+            annotation = result  # fallback for pre-4 output (plain Annotation)
+        return [
+            (turn.start, turn.end, speaker)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+        ]
 
     @staticmethod
     def _safe_input(path: str):
