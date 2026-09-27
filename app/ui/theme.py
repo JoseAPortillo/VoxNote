@@ -53,6 +53,12 @@ DARK: dict[str, str] = {
     "scrollbar_hover": "#636675",
     "tooltip_bg": "#2e303a",
     "tooltip_text": "#e8eaef",
+    # In/out mark shading, published to the widgets as application properties
+    # because it is custom painting that QSS cannot reach (see apply_theme).
+    # These two are read back through QColor, which rejects a CSS rgba() string,
+    # so they are #AARRGGBB rather than the rgba() form used above.
+    "mark_fill": "#47ffc46b",  # amber at 28% over the dark groove
+    "mark_edge": "#ffc46b",
 }
 
 LIGHT: dict[str, str] = {
@@ -77,6 +83,10 @@ LIGHT: dict[str, str] = {
     "scrollbar_hover": "#a9acb7",
     "tooltip_bg": "#ffffff",
     "tooltip_text": "#1e2026",
+    # Amber stays readable on the light groove; the fill keeps more alpha
+    # because light grooves swallow less of it than the dark ones.
+    "mark_fill": "#4dde8f18",  # amber at 30% over the light groove
+    "mark_edge": "#a86400",
 }
 
 # -- stylesheet ---------------------------------------------------------------
@@ -462,7 +472,14 @@ def _build_palette(colors: dict[str, str]) -> QPalette:
 
 
 def apply_theme(app: QApplication, dark: bool = True) -> None:
-    """Apply the dark or light theme (QPalette + QSS) to the whole app."""
+    """Apply the dark or light theme (QPalette + QSS) to the whole app.
+
+    The in/out mark shading is custom painting, which QSS cannot style, so its
+    colors travel as application properties instead. They are read at paint
+    time (see ``app.ui.seek_slider.theme_color``), and setting the style sheet
+    repolishes every widget, so an open slider picks the new colors up on the
+    next repaint without any extra wiring here.
+    """
     if not app.property("_theme_fusion"):
         # Fusion renders QSS consistently across platforms/styles.
         app.setStyle("Fusion")
@@ -470,3 +487,5 @@ def apply_theme(app: QApplication, dark: bool = True) -> None:
     colors = DARK if dark else LIGHT
     app.setPalette(_build_palette(colors))
     app.setStyleSheet(_QSS.substitute(colors))
+    app.setProperty("markFillColor", colors["mark_fill"])
+    app.setProperty("markEdgeColor", colors["mark_edge"])

@@ -1,21 +1,145 @@
-"""Interactive seek slider: click-to-position and drag-to-seek."""
+"""Interactive seek slider with in/out mark shading, and the mark strip below it.
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QSlider, QStyle
+One widget class serves both players: the audio bar of the main window holds it
+as ``seek_slider`` and the video window as ``slider``, so painting the marks
+here gives the feature to both at once.
+
+Marks live on the media timeline in SECONDS while both players seek in
+MILLISECONDS. That conversion happens in exactly one place,
+:meth:`SeekSlider.mark_pixel_rects`, which maps seconds onto the groove rect
+the style reports. :class:`MarksStrip` then reads those very same rects, so the
+shading on the groove and the ``{``/``}`` braces underneath cannot
+desynchronize: there is a single geometry behind both.
+
+The widget owns no persistence. Every edit is applied in memory, normalized,
+and announced through :attr:`SeekSlider.marks_edited`; the owner (the main
+window, which holds the repository) writes it and mirrors the new state to the
+other player.
+"""
+
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QMouseEvent,
+    QPainter,
+    QPalette,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QMenu,
+    QSizePolicy,
+    QSlider,
+    QStyle,
+    QStyleOptionSlider,
+    QWidget,
+)
+
+from app.core.models import normalize_marks
+
+# Overrides for the properties ``apply_theme`` publishes on the application.
+# They are the fallback for a slider built before any theme was applied.
+DEFAULT_MARK_FILL = "#99f2a33c"
+DEFAULT_MARK_EDGE = "#ffc46b"
+
+# A very short range can round to zero groove pixels; keep it visible.
+MIN_MARK_WIDTH_PX = 3
+
+# Height of the brace row under the groove.
+STRIP_HEIGHT = 20
+
+
+def style_sub_control(name: str):
+    """The ``QStyle`` enum member named ``name``, or ``None`` if absent.
+
+    Qt renamed ``SubControl`` to ``SubElement`` and PySide6 only regenerated
+    the scoped enums in later releases, so the ``SC_*`` members live under
+    ``SubControl`` in some versions and under ``SubElement`` in others. Asking
+    for the member instead of hardcoding one spelling is what keeps the groove
+    query below working across releases instead of raising ``TypeError`` the
+    first time the style is asked for a sub-element rect.
+    """
+    for owner in ("SubControl", "SubElement"):
+        enum = getattr(QStyle, owner, None)
+        if enum is not None and hasattr(enum, name):
+            return getattr(enum, name)
+    return None
+
+
+def theme_color(property_name: str, default: str) -> QColor:
+    """Read a paint-time color published by :func:`app.ui.theme.apply_theme`.
+
+    The mark shading is custom painting, which QSS cannot style, so the theme
+    hands its colors to the widgets as application properties. Reading them at
+    paint time (instead of caching them) is what makes a theme switch repaint
+    the shading and the braces with no extra wiring.
+    """
+    app = QApplication.instance()
+    value = app.property(property_name) if app is not None else None
+    color = QColor(value) if isinstance(value, str) and value else QColor(default)
+    return color if color.isValid() else QColor(default)
+
+
+def format_position(ms: int) -> str:
+    """Format milliseconds as ``mm:ss`` (or ``h:mm:ss`` past one hour).
+
+    Same shape the two player windows use for their time labels, so the
+    context menu speaks about a position with the vocabulary already on screen.
+    """
+    total_s = max(0, int(ms)) // 1000
+    m, s = divmod(total_s, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 
 class SeekSlider(QSlider):
     """Horizontal QSlider where a left-click jumps to the clicked position
     and a left-button drag follows the cursor continuously.
 
+    On top of that it paints the in/out marks of the selected media: every
+    marked range is shaded over the real groove and mirrored as a ``{``/``}``
+    pair by the :class:`MarksStrip` placed underneath. A right-click opens a
+    menu to mark the start, mark the end, remove the range under the cursor or
+    clear every mark; the first two act on the current playback position, which
+    the slider mirrors in its own value, and both show the position they will
+    use so the behavior needs no documentation.
+
     Default QSlider moves by page-step on click; this overrides that with
     ``QStyle.sliderValueFromPosition``. Standard signals (sliderPressed,
     sliderMoved, sliderReleased, valueChanged) are left untouched.
+
+    Signals:
+        marks_edited(object, object, str): the user changed the marks through
+            the context menu. Carries ``(marks, pending_in, message)``:
+            ``marks`` is already normalized (``None`` when there are none, never
+            ``[]``), ``pending_in`` is the start mark still waiting for its end
+            (``None`` when there is none) and ``message`` is the Spanish status
+            text describing what happened, including why an edit was ignored.
+            The owner persists ``marks`` and shows ``message``.
+        marks_state_changed(): the marks or the editable state changed, without
+            a user edit. Attached strips refresh their text from it.
     """
+
+    marks_edited = Signal(object, object, str)
+    marks_state_changed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
+        self._marks: list[list[float]] | None = None
+        self._duration_ms = 0
+        self._pending_in: float | None = None
+        self._marks_editable = True
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+        self.setAccessibleName("Barra de posición del medio")
+        self.setToolTip(
+            "Clic para buscar. Clic derecho: marcar inicio, marcar fin, "
+            "quitar el tramo bajo el cursor o limpiar todas las marcas."
+        )
 
     def _value_at(self, x: int) -> int:
         return QStyle.sliderValueFromPosition(
@@ -31,3 +155,381 @@ class SeekSlider(QSlider):
         if event.buttons() & Qt.MouseButton.LeftButton:
             self.setValue(self._value_at(event.position().toPoint().x()))
         super().mouseMoveEvent(event)
+
+    # -- marks state ---------------------------------------------------------
+    def marks(self) -> list[list[float]] | None:
+        """The marked ranges in seconds, ordered and without overlaps."""
+        return self._marks
+
+    def pending_in(self) -> float | None:
+        """The start mark in seconds still waiting for its end, if any."""
+        return self._pending_in
+
+    def set_marks(
+        self,
+        marks,
+        duration_ms: int,
+        pending_in: float | None = None,
+    ) -> None:
+        """Show ``marks`` (absolute seconds) over a ``duration_ms`` timeline.
+
+        ``duration_ms`` is the media duration, the same value the owner sets as
+        the slider range: seconds are placed as a fraction of it, so the two
+        must agree. ``None`` and an empty list both mean "no marks", because
+        the stored state for no marks is ``None`` (``normalize_marks``) and
+        painting an empty list as "everything is marked" would be the one
+        wrong reading.
+
+        ``pending_in`` is display state, not stored state: a start mark with no
+        end yet cannot become a range on its own, so it is pushed in by the
+        owner that owns it.
+        """
+        self._marks = normalize_marks(marks)
+        self._duration_ms = max(0, int(duration_ms))
+        self._pending_in = None if pending_in is None else max(0.0, float(pending_in))
+        self.marks_state_changed.emit()
+        self.update()
+
+    def set_marks_editable(self, editable: bool) -> None:
+        """Allow or block mark editing through the context menu.
+
+        The app clears this while an inference is running: the pipeline drops
+        the marks from the worker thread when it finishes and the repository
+        has no lock, so a mark written by the UI at that moment would be
+        overwritten by that cleanup.
+        """
+        editable = bool(editable)
+        if editable == self._marks_editable:
+            return
+        self._marks_editable = editable
+        self.marks_state_changed.emit()
+
+    def marks_editable(self) -> bool:
+        return self._marks_editable
+
+    # -- geometry ------------------------------------------------------------
+    def _style_option(self) -> QStyleOptionSlider:
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        return option
+
+    def groove_rect(self) -> QRect:
+        """The groove rect the style really paints, in widget coordinates.
+
+        Taken from the style instead of computed by hand: the groove is inset
+        from the widget by the handle width, so invented coordinates would put
+        the shading somewhere the handle is not.
+
+        The style cannot always be asked: PySide6 has shipped releases whose
+        bindings reject the ``SC_*`` enum this call needs. There the groove is
+        derived from the style's own thickness metric and spans the full width,
+        which is at worst half a handle wider on each side -- the band is
+        translucent, so a handle under its edge still reads.
+        """
+        sub = style_sub_control("SC_SliderGroove")
+        if sub is not None:
+            try:
+                return self.style().subElementRect(sub, self._style_option(), self)
+            except TypeError:
+                pass  # this binding does not accept the enum; fall through
+        thickness = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_SliderThickness
+        )
+        return QRect(0, (self.height() - thickness) // 2, self.width(), thickness)
+
+    def _handle_rect(self) -> QRect:
+        """Where the handle is, or an empty rect when the style won't say.
+
+        Only used to redraw the handle over the shading. An empty answer is
+        not an error: the shading is translucent, so the handle stays visible
+        underneath it.
+        """
+        sub = style_sub_control("SC_SliderHandle")
+        if sub is None:
+            return QRect()
+        try:
+            return self.style().subElementRect(sub, self._style_option(), self)
+        except TypeError:
+            return QRect()
+
+    def mark_pixel_rects(self) -> list[QRect]:
+        """One rect per marked range, laid over the real groove.
+
+        The only place where seconds become pixels: a mark is a fraction of
+        the media duration, and that fraction is mapped onto the groove rect,
+        so the shading always sits on the groove and under the handle whatever
+        the style or the theme. Marks are stored in seconds while the duration
+        is kept in milliseconds (the unit both players seek in), so the
+        conversion happens exactly here. Disjoint ranges produce disjoint
+        rects.
+        """
+        marks = self._marks
+        if not marks or self._duration_ms <= 0:
+            return []
+        groove = self.groove_rect()
+        if groove.width() <= 0 or groove.height() <= 0:
+            return []
+        total_s = self._duration_ms / 1000.0
+        left = groove.left()
+        span = groove.width()
+        rects: list[QRect] = []
+        for start, end in marks:
+            start_s = min(max(float(start), 0.0), total_s)
+            end_s = min(max(float(end), 0.0), total_s)
+            if end_s <= start_s:
+                continue
+            x0 = left + int(start_s / total_s * span + 0.5)
+            x1 = left + int(end_s / total_s * span + 0.5)
+            if x1 - x0 < MIN_MARK_WIDTH_PX:
+                x1 = x0 + MIN_MARK_WIDTH_PX
+            if x1 > left + span:
+                x0 = max(left, x1 - span)
+                x1 = left + span
+            rects.append(QRect(x0, groove.top(), x1 - x0, groove.height()))
+        return rects
+
+    def _position_seconds_at(self, x: int) -> float:
+        """Seconds under widget ``x``, read through the painting groove.
+
+        The removal action uses the same mapping that drew the shading, so
+        "the range under the cursor" is literally the range the user sees. The
+        groove spans the whole duration, hence the ms -> s conversion that
+        keeps the answer comparable with the stored marks.
+        """
+        total = self._duration_ms
+        groove = self.groove_rect()
+        if total <= 0 or groove.width() <= 0:
+            return 0.0
+        ratio = (x - groove.left()) / groove.width()
+        return min(max(ratio, 0.0), 1.0) * total / 1000.0
+
+    # -- painting ------------------------------------------------------------
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        rects = self.mark_pixel_rects()
+        if not rects:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(theme_color("markFillColor", DEFAULT_MARK_FILL))
+            painter.setPen(QPen(theme_color("markEdgeColor", DEFAULT_MARK_EDGE), 1.0))
+            radius = min(2.0, max(1.0, rects[0].height() / 4.0))
+            for rect in rects:
+                # Inset by one pixel so the pen lands inside the groove.
+                painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), radius, radius)
+            # The bands are translucent, so the played sub-page still shows
+            # through, but the handle would sit under them: draw it again on
+            # top so the current position stays readable.
+            handle = self._handle_rect()
+            if not handle.isEmpty():
+                # Clipped to the handle: the same control draws the groove and
+                # the pages too, and only the handle may be repainted.
+                painter.save()
+                try:
+                    painter.setClipRect(handle)
+                    self.style().drawComplexControl(
+                        QStyle.ComplexControl.CC_Slider,
+                        self._style_option(),
+                        painter,
+                        self,
+                    )
+                finally:
+                    painter.restore()
+        finally:
+            painter.end()
+
+    # -- context menu --------------------------------------------------------
+    def _on_context_menu(self, pos) -> None:
+        """Offer the four mark actions, each labelled with what it will do."""
+        if not self._marks_editable or self._duration_ms <= 0:
+            # Without a loaded media there is no timeline to place a mark on.
+            return
+        at = format_position(self.value())
+        menu = QMenu(self)
+        action_in = menu.addAction(f"Marcar inicio en {at}")
+        action_out = menu.addAction(f"Marcar fin en {at}")
+        menu.addSeparator()
+        action_remove = menu.addAction("Quitar el tramo bajo el cursor")
+        action_clear = menu.addAction("Limpiar todas las marcas")
+        has_marks = bool(self._marks)
+        action_remove.setEnabled(has_marks)
+        action_clear.setEnabled(has_marks)
+        chosen = menu.exec(self.mapToGlobal(pos))
+        if chosen is action_in:
+            self._mark_in(self.value() / 1000.0)
+        elif chosen is action_out:
+            self._mark_out(self.value() / 1000.0)
+        elif chosen is action_remove:
+            self._remove_under_cursor(self._position_seconds_at(pos.x()))
+        elif chosen is action_clear:
+            self._clear_marks()
+
+    def _publish(self, marks, message: str) -> None:
+        """Normalize and store an edit, then announce it to the owner.
+
+        Emitted for rejected edits too, so the reason reaches the status label
+        through the same channel as the confirmation.
+        """
+        self._marks = normalize_marks(marks)
+        self.marks_edited.emit(self._marks, self._pending_in, message)
+        self.marks_state_changed.emit()
+
+    def _mark_in(self, position_s: float) -> None:
+        """Remember a start mark; it becomes a range once its end arrives."""
+        self._pending_in = max(0.0, float(position_s))
+        self._publish(
+            self._marks, f"Inicio pendiente en {format_position(self.value())}."
+        )
+
+    def _mark_out(self, position_s: float) -> None:
+        """Close the pending start mark into a range, or explain why not."""
+        pending = self._pending_in
+        if pending is None:
+            self._publish(
+                self._marks,
+                "No hay ningún inicio pendiente: marca antes un inicio.",
+            )
+            return
+        end = max(0.0, float(position_s))
+        if end <= pending:
+            self._publish(
+                self._marks,
+                f"El fin ({format_position(round(end * 1000))}) no es posterior "
+                f"al inicio ({format_position(round(pending * 1000))}): se ignora.",
+            )
+            return
+        self._pending_in = None
+        start_s, end_s = pending, end
+        self._publish(
+            (self._marks or []) + [[start_s, end_s]],
+            f"Tramo marcado de {format_position(round(start_s * 1000))} "
+            f"a {format_position(round(end_s * 1000))}.",
+        )
+
+    def _remove_under_cursor(self, position_s: float) -> None:
+        """Drop the range the cursor sits on, or say that there is none."""
+        marks = self._marks
+        if not marks:
+            self._publish(marks, "No hay marcas que quitar.")
+            return
+        kept = [pair for pair in marks if not (pair[0] <= position_s <= pair[1])]
+        if len(kept) == len(marks):
+            self._publish(
+                marks, "No hay ningún tramo de marcado bajo el cursor."
+            )
+            return
+        self._publish(
+            kept, f"Tramo quitado en {format_position(round(position_s * 1000))}."
+        )
+
+    def _clear_marks(self) -> None:
+        if not self._marks and self._pending_in is None:
+            self._publish(self._marks, "No hay marcas que limpiar.")
+            return
+        self._pending_in = None
+        self._publish(None, "Marcas limpiadas.")
+
+
+class MarksStrip(QWidget):
+    """Read-only row of ``{``/``}`` braces under a :class:`SeekSlider`.
+
+    It computes no geometry of its own: every brace is placed at the edges of a
+    rect returned by :meth:`SeekSlider.mark_pixel_rects`, the same rects the
+    slider fills with the shading, so the two views cannot drift apart. Being a
+    real widget in the layout is what makes it follow the window on resize, and
+    it carries a Spanish accessible name and tooltip.
+    """
+
+    def __init__(self, slider: SeekSlider, parent=None) -> None:
+        super().__init__(parent)
+        self._slider = slider
+        self._editable = True
+        self.setFixedHeight(STRIP_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName("Tira de marcas de inicio y fin")
+        self._slider.marks_state_changed.connect(self._refresh_state)
+        self._refresh_state()
+
+    # -- state ---------------------------------------------------------------
+    def _refresh_state(self) -> None:
+        """Restate the marks in the tooltip, which is where they are read."""
+        pending = self._slider.pending_in()
+        if pending is None:
+            head = ""
+        else:
+            head = f"Inicio pendiente en {format_position(round(pending * 1000))}. "
+        marks = self._slider.marks()
+        if marks:
+            spans = ", ".join(
+                f"{format_position(round(start * 1000))}"
+                f"–{format_position(round(end * 1000))}"
+                for start, end in marks
+            )
+            body = f"Marcas: {spans}."
+        else:
+            body = "Sin marcas."
+        self.setToolTip(
+            f"{head}{body} Se edita con el botón derecho sobre la barra de posición."
+        )
+        self.update()
+
+    def set_marks_editable(self, editable: bool) -> None:
+        """Dim the braces while editing is blocked (a run is in flight)."""
+        editable = bool(editable)
+        if editable == self._editable:
+            return
+        self._editable = editable
+        self.update()
+
+    # -- painting ------------------------------------------------------------
+    def _x_offset(self) -> int:
+        """Horizontal distance from this strip to the slider's left edge.
+
+        Both widgets live in the same layout column, so this is normally zero;
+        it is measured rather than assumed so the braces cannot drift away from
+        the shading they mirror. ``mapToGlobal`` is used instead of ``mapTo``
+        because older PySide6 releases crash when mapping one widget onto a
+        sibling of its own parent.
+        """
+        return (
+            self._slider.mapToGlobal(QPoint(0, 0)).x()
+            - self.mapToGlobal(QPoint(0, 0)).x()
+        )
+
+    def paintEvent(self, event) -> None:
+        rects = self._slider.mark_pixel_rects()
+        if not rects:
+            return
+        offset = self._x_offset()
+        font = QFont(self.font())
+        font.setBold(True)
+        painter = QPainter(self)
+        try:
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+            if self._editable:
+                color = theme_color("markEdgeColor", DEFAULT_MARK_EDGE)
+            else:
+                color = QColor(self.palette().color(QPalette.ColorRole.PlaceholderText))
+            painter.setPen(QPen(color))
+            baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
+            glyph_w = metrics.horizontalAdvance("W")
+            for rect in rects:
+                left = rect.left() + offset
+                right = rect.right() + offset
+                self._draw_brace(painter, "{", left, baseline, glyph_w)
+                # A range narrower than the two glyphs would print them on top
+                # of each other; the start brace alone still says "marked".
+                if right - left >= 2 * glyph_w:
+                    self._draw_brace(painter, "}", right, baseline, glyph_w)
+        finally:
+            painter.end()
+
+    def _draw_brace(
+        self, painter: QPainter, text: str, center_x: int, baseline: int, glyph_w: int
+    ) -> None:
+        x = int(center_x - glyph_w / 2)
+        if x < 0 or x + glyph_w > self.width():
+            return  # outside the strip: nothing to anchor the brace to
+        painter.drawText(QPoint(x, baseline), text)

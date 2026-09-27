@@ -29,7 +29,7 @@ from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
 from app.ui.media_list import MediaList
-from app.ui.seek_slider import SeekSlider
+from app.ui.seek_slider import MarksStrip, SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
@@ -77,7 +77,11 @@ class MainWindow(QMainWindow):
         self.resize(920, 720)
 
         self.repository = MediaRepository()
-        self.pipeline = Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)
+        # The pipeline gets the same repository so a run that consumed the marks
+        # can clear them itself, on success, from the worker thread.
+        self.pipeline = Pipeline(
+            Transcriber(), target_lang=TRANSLATE_TARGET_LANG, repository=self.repository
+        )
         self._worker: InferenceWorker | None = None
         self._last_run: RunResult | None = None
         self._active_pane: str = "transcript"  # pane receiving live segments
@@ -100,6 +104,12 @@ class MainWindow(QMainWindow):
         self._playing_path: str | None = None
         self._seeking = False
         self._duration_ms = 0
+        # A start mark with no end yet cannot be stored (normalize_marks would
+        # drop it), so it lives here, in memory, for the loaded media only.
+        self._pending_in: float | None = None
+        # Whether the run in flight consumed marks: decided once, before the
+        # worker starts, because the pipeline clears them from that thread.
+        self._run_used_marks = False
         self.video_window: VideoPlayerWindow | None = None  # lazy; hidden, not deleted
 
         self._dark = load_dark_setting()
@@ -141,15 +151,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.media_list, stretch=3)
 
         # Playback bar: seek slider + elapsed/total time (hidden until a
-        # source is loaded; durationChanged shows it).
+        # source is loaded; durationChanged shows it), with the mark strip
+        # under it.
         self.playback_bar = QWidget()
-        bar_layout = QHBoxLayout(self.playback_bar)
+        bar_column = QVBoxLayout(self.playback_bar)
+        bar_column.setContentsMargins(0, 0, 0, 0)
+        bar_column.setSpacing(2)
+        bar_layout = QHBoxLayout()
         bar_layout.setContentsMargins(0, 0, 0, 0)
         bar_layout.setSpacing(8)
         self.seek_slider = SeekSlider()
         self.time_label = QLabel("00:00 / 00:00")
         bar_layout.addWidget(self.seek_slider, stretch=1)
         bar_layout.addWidget(self.time_label)
+        bar_column.addLayout(bar_layout)
+        self.marks_strip = MarksStrip(self.seek_slider, self.playback_bar)
+        bar_column.addWidget(self.marks_strip)
         layout.addWidget(self.playback_bar)
         self.playback_bar.setVisible(False)
 
@@ -332,6 +349,8 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(self._on_position_changed)
         self.seek_slider.sliderPressed.connect(self._on_seek_pressed)
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
+        # marks_state_changed already reaches the mark strip, which owns it.
+        self.seek_slider.marks_edited.connect(self._on_marks_edited)
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
@@ -361,6 +380,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, self._dark)
+        # The mark shading is custom painting, so the theme only hands it new
+        # colors; re-pushing the marks is what repaints the open players with
+        # them right away, even when nothing else on screen is moving.
+        self._push_marks_to_players(self.seek_slider.marks())
         save_dark_setting(self._dark)
         self._update_theme_button()
 
@@ -413,6 +436,11 @@ class MainWindow(QMainWindow):
         run_sides = self._run_sides_for(pane)
         if item is not None and not self._confirm_replacing_notes(item, run_sides):
             return
+        # The marks are an INPUT of this run, not UI state: read them here,
+        # before the worker starts, so the decision cannot be changed between
+        # reading and running. None means no marks and scopes nothing.
+        ranges = item.marks if item is not None else None
+        self._run_used_marks = bool(ranges)
 
         self._stop_playback(reset_status=False)
         diarize = self.chk_diarize.isChecked()
@@ -430,7 +458,12 @@ class MainWindow(QMainWindow):
         self._set_pane_text(pane, "")
         self._refresh_scroll_sync()
         self.progress.setValue(0)
-        self.status_label.setText("Iniciando…")
+        # A scoped run returns only part of the media, so the status says so
+        # before the first segment arrives instead of surprising the user with
+        # a short transcript.
+        self.status_label.setText(
+            "Iniciando… (solo los tramos marcados)" if ranges else "Iniciando…"
+        )
         self._set_busy(True)
 
         def runnable(path, on_segment, on_progress, on_status) -> RunResult:
@@ -440,6 +473,7 @@ class MainWindow(QMainWindow):
                 on_progress=on_progress,
                 on_status=on_status,
                 diarize=diarize,
+                ranges=ranges,
             )
 
         worker = InferenceWorker(runnable, path, parent=self)
@@ -477,6 +511,7 @@ class MainWindow(QMainWindow):
         window.play_toggled.connect(self._on_video_play_toggled)
         window.seek_released.connect(self._on_video_seek_released)
         window.closed.connect(self._on_video_window_closed)
+        window.marks_changed.connect(self._on_marks_edited)
         self.video_window = window
         return window
 
@@ -501,6 +536,11 @@ class MainWindow(QMainWindow):
         self._duration_ms = 0
         self.seek_slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
+        # Nothing of the previous source may survive into this one: no marks
+        # painted and no pending start. The new media's own marks are painted
+        # by _on_duration_changed, once its duration is known.
+        self._pending_in = None
+        self._push_marks_to_players(None)
         if self._is_video(path):
             self._start_video(path)
         else:
@@ -579,6 +619,10 @@ class MainWindow(QMainWindow):
         if self.video_window is not None:
             self.video_window.set_playing_state(False)
             self.video_window.hide()
+        # No media is loaded any more, so no mark can be painted: a start mark
+        # left pending would otherwise leak into the next source.
+        self._pending_in = None
+        self._push_marks_to_players(None)
         if reset_status:
             self.status_label.setText("Listo.")
 
@@ -612,6 +656,9 @@ class MainWindow(QMainWindow):
         self._sync_time_label(self.seek_slider.value())
         if self.video_window is not None:
             self.video_window.set_duration(duration)
+        # The duration is the denominator of the mark geometry, so this is the
+        # first moment the stored marks can be placed on the timeline.
+        self._load_marks_for(self._playing_path)
 
     def _on_position_changed(self, position: int) -> None:
         if self._seeking:
@@ -628,6 +675,65 @@ class MainWindow(QMainWindow):
         self._seeking = False
         self.player.setPosition(self.seek_slider.value())
         self._sync_time_label(self.seek_slider.value())
+
+    # -- in/out marks ---------------------------------------------------------
+    def _push_marks_to_players(self, marks) -> None:
+        """Show the same marks in both players, over the current duration.
+
+        The marks belong to one media, so the audio bar and the video window
+        must always agree: one of them is where the user just edited and the
+        other is the mirror. ``marks`` is already normalized by the slider; the
+        duration is the denominator of the mark geometry, so both widgets get
+        the same one and stay in step.
+
+        This cannot re-enter :meth:`_on_marks_edited`: only a user edit emits
+        ``marks_edited``, and ``set_marks`` emits ``marks_state_changed``.
+        """
+        self.seek_slider.set_marks(marks, self._duration_ms, self._pending_in)
+        if self.video_window is not None:
+            self.video_window.set_marks(marks, self._duration_ms, self._pending_in)
+
+    def _load_marks_for(self, path: str | None) -> None:
+        """Paint the stored marks of ``path`` in both players.
+
+        Called once the duration is known, because the duration is what places
+        the marks on the timeline. ``None`` (nothing loaded, or not registered)
+        means no marks, which is also the state a media without marks stores.
+        """
+        marks = None
+        if path is not None:
+            index = self.repository.index_of(path)
+            item = self.repository.get(index) if index is not None else None
+            if item is not None:
+                marks = item.marks
+        self._push_marks_to_players(marks)
+
+    def _on_marks_edited(self, marks, pending_in, message: str) -> None:
+        """Persist a mark edit made in either player and mirror it to both.
+
+        The marks belong to the media whose timeline is LOADED IN THE PLAYER
+        (``self._playing_path``), not to the list selection: clicking a play
+        icon does not change the selection, so the two can be different files,
+        and the bar the user marked on shows the loaded one. Writing them to the
+        selection would store them against a media nobody is looking at.
+
+        ``pending_in`` is display state and is never persisted: a start mark
+        with no end is not a range yet, and ``normalize_marks`` would drop it.
+
+        A run in flight cannot race this write: ``_set_busy`` blocks mark
+        editing, so the context menu cannot open while the worker holds the
+        marks it is about to clear.
+        """
+        path = self._playing_path
+        if path is None:
+            # Belt and braces: the menu is already disabled without a duration.
+            return
+        index = self.repository.index_of(path)
+        if index is not None:
+            self.repository.update_marks(index, marks)
+        self._pending_in = pending_in
+        self._push_marks_to_players(marks)
+        self.status_label.setText(message)
 
     # -- run results ----------------------------------------------------------
     @staticmethod
@@ -714,10 +820,20 @@ class MainWindow(QMainWindow):
         )
         self._refresh_scroll_sync()
         lang = result.translation_lang or result.transcript_lang
-        self.status_label.setText(f"Completado. Idioma detectado: {lang or '?'}.")
+        consumed_marks = self._run_used_marks
+        # The pipeline already cleared those marks in the repository; re-reading
+        # is what makes the shading disappear exactly when they are consumed,
+        # instead of leaving the user to guess the marks are still in force.
+        self._pending_in = None
+        self._load_marks_for(self._playing_path)
+        text = f"Completado. Idioma detectado: {lang or '?'}."
+        if consumed_marks:
+            text += " Marcas consumidas."
+        self.status_label.setText(text)
         self._running_path = None
         self._run_snapshot = None
         self._run_sides = ()
+        self._run_used_marks = False
         self._set_busy(False)
 
     def _persist_results(self, **fields) -> None:
@@ -788,9 +904,14 @@ class MainWindow(QMainWindow):
             self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
         )
         self._refresh_scroll_sync()
+        # A failed run consumed nothing, so the marks are still stored: re-read
+        # them and repaint, and the UI can never disagree with storage.
+        self._pending_in = None
+        self._load_marks_for(self._playing_path)
         self._running_path = None
         self._run_snapshot = None
         self._run_sides = ()
+        self._run_used_marks = False
         self._set_busy(False)
         self.status_label.setText("Error.")
         QMessageBox.critical(self, "Error", message)
@@ -885,6 +1006,14 @@ class MainWindow(QMainWindow):
         self.media_list.setEnabled(not busy)
         self.pane_transcript.setEnabled(not busy)
         self.pane_translation.setEnabled(not busy)
+        # Not cosmetics: the pipeline clears the marks from the worker thread
+        # when the run succeeds, and the repository has no lock. Blocking the
+        # edit for the whole run is what keeps a mark written by the UI from
+        # being overwritten by that cleanup.
+        self.seek_slider.set_marks_editable(not busy)
+        self.marks_strip.set_marks_editable(not busy)
+        if self.video_window is not None:
+            self.video_window.set_marks_editable(not busy)
         self._refresh_buttons(busy)
 
     def _refresh_buttons(self, busy: bool = False) -> None:
