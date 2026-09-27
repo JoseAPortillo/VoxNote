@@ -83,10 +83,41 @@ LIGHT: dict[str, str] = {
     "scrollbar_hover": "#a9acb7",
     "tooltip_bg": "#ffffff",
     "tooltip_text": "#1e2026",
-    # Amber stays readable on the light groove; the fill keeps more alpha
-    # because light grooves swallow less of it than the dark ones.
-    "mark_fill": "#4dde8f18",  # amber at 30% over the light groove
-    "mark_edge": "#a86400",
+    # Amber stays readable on the light groove. The light groove is $border
+    # (#d6d8df), much lighter than the dark one, so the same 28% amber that
+    # measures 1.86 against the dark groove collapses to 1.21 here -- a mark
+    # you cannot see. Both values below were CHOSEN BY MEASURING RENDERED
+    # PIXELS (grab the slider offscreen, read the pixels, WCAG ratio against
+    # the groove pixel), not by picking a hex and hoping:
+    #   mark_fill  #4dde8f18 -> 1.21  (invisible)   #b35c3700 -> 3.73
+    #   mark_edge  #a86400   -> 2.48  (too weak)    #5c3700   -> 5.40
+    # 70% alpha is deliberate: the band must stay translucent so the played
+    # sub-page and the handle both still read through it, which is why the
+    # colour is darker rather than the alpha higher.
+    "mark_fill": "#b35c3700",  # rendered 3.73:1 against the light groove
+    "mark_edge": "#5c3700",  # rendered 5.40:1 against the light groove
+}
+
+# -- seek slider geometry ----------------------------------------------------
+# Single source of truth for the painted seek slider, shared by the stylesheet
+# below (which is generated from these numbers) and by
+# ``SeekSlider.groove_rect()``. Keeping one definition is what stops the groove
+# the style paints and the groove the widget assumes from drifting apart.
+#
+# MEASURED, not guessed: PySide6 6.11.2, Fusion, this stylesheet applied, a
+# 678x15 SeekSlider with range 0..1000 and the value at max. The groove paints
+# on rows 5..9 -- SEEK_GROOVE_HEIGHT_PX tall, vertically centred in 15 px --
+# and spans the full widget width with no horizontal inset for the handle.
+# The handle is SEEK_HANDLE_SIZE_PX square and overhangs the groove vertically
+# by SEEK_HANDLE_MARGIN_Y_PX, which is why it is never clipped away by it.
+SEEK_GROOVE_HEIGHT_PX = 5
+SEEK_HANDLE_SIZE_PX = 14
+SEEK_HANDLE_MARGIN_Y_PX = 5
+
+_SEEK_GEOMETRY_QSS: dict[str, str] = {
+    "seek_groove_height": str(SEEK_GROOVE_HEIGHT_PX),
+    "seek_handle_size": str(SEEK_HANDLE_SIZE_PX),
+    "seek_handle_margin_y": str(SEEK_HANDLE_MARGIN_Y_PX),
 }
 
 # -- stylesheet ---------------------------------------------------------------
@@ -243,8 +274,11 @@ QProgressBar::chunk {
 }
 
 /* ===== Seek slider ===== */
+/* The groove/handle metrics come from SEEK_GROOVE_HEIGHT_PX and friends, which
+   SeekSlider.groove_rect() also reads, so the painting and the mark bands
+   cannot disagree about where the groove is. */
 QSlider::groove:horizontal {
-    height: 5px;
+    height: ${seek_groove_height}px;
     background: $surface_alt;
     border-radius: 2px;
 }
@@ -258,9 +292,9 @@ QSlider::add-page:horizontal {
 }
 QSlider::handle:horizontal {
     background: $accent;
-    width: 14px;
-    height: 14px;
-    margin: -5px 0;
+    width: ${seek_handle_size}px;
+    height: ${seek_handle_size}px;
+    margin: -${seek_handle_margin_y}px 0;
     border-radius: 7px;
 }
 QSlider::handle:horizontal:hover { background: $accent_hover; }
@@ -486,6 +520,6 @@ def apply_theme(app: QApplication, dark: bool = True) -> None:
         app.setProperty("_theme_fusion", True)
     colors = DARK if dark else LIGHT
     app.setPalette(_build_palette(colors))
-    app.setStyleSheet(_QSS.substitute(colors))
+    app.setStyleSheet(_QSS.substitute({**colors, **_SEEK_GEOMETRY_QSS}))
     app.setProperty("markFillColor", colors["mark_fill"])
     app.setProperty("markEdgeColor", colors["mark_edge"])

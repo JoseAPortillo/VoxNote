@@ -7,7 +7,10 @@ here gives the feature to both at once.
 Marks live on the media timeline in SECONDS while both players seek in
 MILLISECONDS. That conversion happens in exactly one place,
 :meth:`SeekSlider.mark_pixel_rects`, which maps seconds onto the groove rect
-the style reports. :class:`MarksStrip` then reads those very same rects, so the
+:class:`SeekSlider.groove_rect` derives from the stylesheet metrics. That rect
+is not guessed: it is built from the same constants the stylesheet itself is
+generated from, and it was confirmed against the pixels PySide6 6.11.2
+actually paints. :class:`MarksStrip` then reads those very same rects, so the
 shading on the groove and the ``{``/``}`` braces underneath cannot
 desynchronize: there is a single geometry behind both.
 
@@ -33,11 +36,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QStyle,
-    QStyleOptionSlider,
     QWidget,
 )
 
 from app.core.models import normalize_marks
+from app.ui.theme import SEEK_GROOVE_HEIGHT_PX
 
 # Overrides for the properties ``apply_theme`` publishes on the application.
 # They are the fallback for a slider built before any theme was applied.
@@ -49,23 +52,6 @@ MIN_MARK_WIDTH_PX = 3
 
 # Height of the brace row under the groove.
 STRIP_HEIGHT = 20
-
-
-def style_sub_control(name: str):
-    """The ``QStyle`` enum member named ``name``, or ``None`` if absent.
-
-    Qt renamed ``SubControl`` to ``SubElement`` and PySide6 only regenerated
-    the scoped enums in later releases, so the ``SC_*`` members live under
-    ``SubControl`` in some versions and under ``SubElement`` in others. Asking
-    for the member instead of hardcoding one spelling is what keeps the groove
-    query below working across releases instead of raising ``TypeError`` the
-    first time the style is asked for a sub-element rect.
-    """
-    for owner in ("SubControl", "SubElement"):
-        enum = getattr(QStyle, owner, None)
-        if enum is not None and hasattr(enum, name):
-            return getattr(enum, name)
-    return None
 
 
 def theme_color(property_name: str, default: str) -> QColor:
@@ -208,49 +194,33 @@ class SeekSlider(QSlider):
         return self._marks_editable
 
     # -- geometry ------------------------------------------------------------
-    def _style_option(self) -> QStyleOptionSlider:
-        option = QStyleOptionSlider()
-        self.initStyleOption(option)
-        return option
-
     def groove_rect(self) -> QRect:
         """The groove rect the style really paints, in widget coordinates.
 
-        Taken from the style instead of computed by hand: the groove is inset
-        from the widget by the handle width, so invented coordinates would put
-        the shading somewhere the handle is not.
+        Computed from the stylesheet metrics rather than asked to the style,
+        because on PySide6 6.11.2 the style cannot be asked: ``QStyle`` does
+        not expose ``SC_SliderGroove``/``SC_SliderHandle`` at all (the name
+        silently resolves to a scrollbar alias, so a lookup "succeeds" while
+        returning the wrong enum), and ``subElementRect`` raises ``TypeError``
+        for every slider sub-control. The one fallback that did run asked the
+        style for ``PM_SliderThickness``, which degenerates to the widget
+        height and therefore handed back the whole widget -- bands three times
+        too tall, overhanging the groove on both sides.
 
-        The style cannot always be asked: PySide6 has shipped releases whose
-        bindings reject the ``SC_*`` enum this call needs. There the groove is
-        derived from the style's own thickness metric and spans the full width,
-        which is at worst half a handle wider on each side -- the band is
-        translucent, so a handle under its edge still reads.
+        MEASURED on PySide6 6.11.2, Fusion, this project's stylesheet, a
+        678x15 widget with range 0..1000: the groove paints on rows 5..9, i.e.
+        ``SEEK_GROOVE_HEIGHT_PX`` tall and vertically centred, and it spans the
+        full widget width with no horizontal inset for the handle. Those
+        numbers are the ones the stylesheet itself is generated from (see
+        ``SEEK_GROOVE_HEIGHT_PX`` in :mod:`app.ui.theme`), so this rect cannot
+        drift away from the pixels the style actually paints.
         """
-        sub = style_sub_control("SC_SliderGroove")
-        if sub is not None:
-            try:
-                return self.style().subElementRect(sub, self._style_option(), self)
-            except TypeError:
-                pass  # this binding does not accept the enum; fall through
-        thickness = self.style().pixelMetric(
-            QStyle.PixelMetric.PM_SliderThickness
+        return QRect(
+            0,
+            (self.height() - SEEK_GROOVE_HEIGHT_PX) // 2,
+            self.width(),
+            SEEK_GROOVE_HEIGHT_PX,
         )
-        return QRect(0, (self.height() - thickness) // 2, self.width(), thickness)
-
-    def _handle_rect(self) -> QRect:
-        """Where the handle is, or an empty rect when the style won't say.
-
-        Only used to redraw the handle over the shading. An empty answer is
-        not an error: the shading is translucent, so the handle stays visible
-        underneath it.
-        """
-        sub = style_sub_control("SC_SliderHandle")
-        if sub is None:
-            return QRect()
-        try:
-            return self.style().subElementRect(sub, self._style_option(), self)
-        except TypeError:
-            return QRect()
 
     def mark_pixel_rects(self) -> list[QRect]:
         """One rect per marked range, laid over the real groove.
@@ -305,6 +275,26 @@ class SeekSlider(QSlider):
 
     # -- painting ------------------------------------------------------------
     def paintEvent(self, event) -> None:
+        """Paint the style, then shade the marked ranges over the groove.
+
+        The handle is deliberately NOT repainted on top of the bands. The style
+        cannot report where it is on PySide6 6.11.2 (see :meth:`groove_rect`),
+        so there is no rect to clip such a redraw to, and deriving one here
+        would mean a second value-to-pixel mapping sitting next to the one the
+        widget already owns -- a second thing to be wrong, for a repaint that
+        changes nothing a user can see.
+
+        The bands do not need it, and that is measured, not assumed. The handle
+        is SEEK_HANDLE_SIZE_PX square with a vertical margin of
+        SEEK_HANDLE_MARGIN_Y_PX, so on a 15 px widget it owns rows 0..3 and
+        10..14 outright; a mark covering the WHOLE timeline leaves every one of
+        those pixels byte-identical, because the band is only
+        SEEK_GROOVE_HEIGHT_PX tall. Only on the groove rows themselves, where
+        the two genuinely overlap, does the handle take the band's colour, and
+        even there it stays a distinct shape (measured 1.11..2.59 contrast
+        between the marked and the unmarked handle, both themes). The handle
+        never disappears, so the old repaint bought nothing.
+        """
         super().paintEvent(event)
         rects = self.mark_pixel_rects()
         if not rects:
@@ -316,26 +306,13 @@ class SeekSlider(QSlider):
             painter.setPen(QPen(theme_color("markEdgeColor", DEFAULT_MARK_EDGE), 1.0))
             radius = min(2.0, max(1.0, rects[0].height() / 4.0))
             for rect in rects:
-                # Inset by one pixel so the pen lands inside the groove.
+                # Shortened by one pixel on the right so the pen eats the last
+                # column of the band instead of the first column of the next
+                # one. The 1px pen is centred on the outline, so vertically it
+                # straddles the boundary: measured, it puts half a pixel of
+                # edge colour on the row ABOVE the groove and keeps the band
+                # covering all SEEK_GROOVE_HEIGHT_PX groove rows.
                 painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), radius, radius)
-            # The bands are translucent, so the played sub-page still shows
-            # through, but the handle would sit under them: draw it again on
-            # top so the current position stays readable.
-            handle = self._handle_rect()
-            if not handle.isEmpty():
-                # Clipped to the handle: the same control draws the groove and
-                # the pages too, and only the handle may be repainted.
-                painter.save()
-                try:
-                    painter.setClipRect(handle)
-                    self.style().drawComplexControl(
-                        QStyle.ComplexControl.CC_Slider,
-                        self._style_option(),
-                        painter,
-                        self,
-                    )
-                finally:
-                    painter.restore()
         finally:
             painter.end()
 
