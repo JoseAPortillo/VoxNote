@@ -33,8 +33,8 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 - [x] T0: spike sin código de producción. Los timestamps son 0-based respecto al array recibido, así que sumar el offset es correcto. Ver [Evidencia](#evidencia). Quedan tres casos sin cubrir, que se cierran en T1 o con un medio real: códecs no-AAC, presencia de pista de vídeo, y rangos de más de 30 s.
 - [x] T1: `app/services/clipper.py` con decode por rango (seek hacia atrás y decodificación hacia adelante descartando hasta el punto exacto, **con guarda de 0.25 s antes del objetivo**). Selección del stream por el **objeto** `c.streams.audio[0]`, validando antes que haya al menos una pista de audio, con mensaje propio. `Pipeline` y `Transcriber` aceptan `ranges: list[tuple[float, float]] | None`, donde `None` significa archivo completo. Timestamps llevados a absolutos. Diarización acotada a los rangos, aunque **no** con `Inference.crop()`: ese método no existe en el pipeline. Ver [Evidencia](#evidencia).
 - [x] T2: `MediaItem.marks: list | None` (`None` = no hay; lista de pares ordenada y sin solapes), operaciones en `MediaRepository`, carga retrocompatible de `items.json` intacta, y limpieza tras ejecución correcta. Ver [Evidencia](#evidencia).
-- [ ] T3: `paintEvent` en `app/ui/seek_slider.py` para el sombreado, tira de marcas debajo con `{` y `}`, menú contextual (marcar inicio, marcar fin, quitar marcas, limpiar), y cableado de `seek_slider` y de `video_window.slider` al mismo modelo por medio seleccionado.
-- [ ] T4: verificación y documentación. `compileall`, smoke Qt offscreen, `git diff --check`, sección en `README.md` en inglés.
+- [x] T3: `paintEvent` en `app/ui/seek_slider.py` para el sombreado, tira de marcas debajo con `{` y `}`, menú contextual (marcar inicio, marcar fin, quitar marcas, limpiar), y cableado de `seek_slider` y de `video_window.slider` al mismo modelo por medio seleccionado. Ver [Evidencia](#evidencia).
+- [ ] T4: documentación. Los checks de `compileall`, smoke Qt offscreen y `git diff --check` ya se ejecutaron como evidencia de T3; queda la sección en `README.md` en inglés.
 
 ## Criterios de aceptación
 - Con dos rangos disjuntos marcados, la transcripción cubre ambos y los timestamps resultantes son absolutos respecto al medio original.
@@ -56,6 +56,8 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 - TDD: no hay suite de tests automatizados en el proyecto; se usarán checks funcionales offscreen.
 - Delivery: `exception-ok` con `size:exception` **aprobada por el mantenedor** (2026-09-26). Motivo: al cruzar T1 las 400 líneas authored y no existir todavía repositorio GitHub, los PRs encadenados no eran ejecutables. Se acepta superar el presupuesto y se sigue en commits de unidad de trabajo; cuando exista el repositorio se decidirá si el historial se divide.
 - Riesgo nativo del slice T1: `gentle-ai review assess` con `--base-ref 42dc326 --committed-only` da `medium` por `executable_change` en `app/services/clipper.py`, 5 rutas y 497 líneas, con `review_due: true` y motivo `slice_budget_reached`. La revisión nativa no se ejecuta todavía: el mantenedor la pospuso para después de la fase de pruebas, y el host no puede lanzar subagentes de revisión (política de tier del proveedor). El límite revisado sigue en `42dc326` para que la feature completa se revise como un único slice.
+- T3 commiteada: `4ced31d` (`feat(ui): wire in/out marks into audio and video players`, 4 archivos, +709/−16) y `ba449d2` (`fix(ui): derive the mark groove from the stylesheet, raise light mark contrast`, 2 archivos, +96/−85). HEAD de la rama: `ba449d2`.
+- Riesgo nativo del slice completo (T1+T2+T3): `medium` por `executable_change` en `app/core/models.py`, **11 rutas y 1427 líneas**, `review_due: true` por `slice_budget_reached`. El mantenedor **rechazó la revisión de este candidato** el 2026-09-27 (`--consent declined` → `consent: declined_this_candidate`, sin autoridad ni recibo creado). El rechazo es por candidato, no un apagado global: el límite revisado sigue en `42dc326` y un candidato futuro volverá a preguntar.
 
 ## Evidencia
 
@@ -143,3 +145,37 @@ La función de módulo recibe lo que el llamante juntó (posiciones del slider, 
 | Ramas con y sin diarizar | PASS: la rama diarizada también limpia, y reenvía los mismos rangos a los dos motores |
 | Regresión sin marcas | PASS: el pipeline recibe `None` (no `[]`), el motor recibe la ruta sin recortar y los tiempos no llevan offset; una ejecución a archivo completo no borra marcas existentes |
 | `git diff --check` | limpio |
+
+### T3 — UI y cableado (cerrada)
+**Commits**: `4ced31d` (initial) y `ba449d2` (corrección de groove y contraste). **Archivos**: `app/ui/seek_slider.py`, `app/ui/video_player_window.py`, `app/ui/main_window.py`, `app/ui/theme.py`. Sin tocar los servicios de T1 ni el repositorio de T2, sin dependencias nuevas.
+
+**1. Las marcas pertenecen al medio que suena, no a la fila seleccionada.** `MainWindow` refleja `item.marks` del **`_playing_path`** y persiste contra ese mismo índice. Elegir otra fila de la lista mientras suena el medio A no toca las marcas del medio B: el estado de la UI tiene que describir lo que se oye, no lo que está resaltado en la tabla. Cuando no hay nada en reproducción, el destino es la selección.
+
+**2. `pending_in` es memoria de la UI, nunca persistencia.** Una marca de inicio sin su fin solo existe mientras se elige el fin. Guardarla en `items.json` en ese estado produciría un par incompleto que `normalize_marks` descartaría en la carga, y el usuario perdería el gesto sin ninguna señal. El modelo de `marks` guarda solo pares cerrados.
+
+**3. `MainWindow` inyecta el repositorio y pasa los rangos.** `Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG, repository=self.repository)`, que es exactamente el pendiente que T2 dejó anotado en una línea. Los `ranges` salen de `normalize_marks(item.marks)`, de modo que el contrato `None` = archivo completo de T1 queda protegido por construcción también desde la UI. La UI **no** borra las marcas por su cuenta: relee del repositorio después de la ejecución, porque la limpieza es responsabilidad del `Pipeline` (T2) y duplicarla aquí abriría la puerta a estados divergentes.
+
+**4. El bloqueo durante la inferencia es de estado, no de visibilidad.** Editar marcas con una ejecución en vuelo dejaría la UI describiendo un `ranges` que el motor ya no va a leer. Se deshabilita la edición y se bloquea el arranque de otra ejecución, y tras el resultado —éxito o fallo— se relee el estado real del repositorio. Un fallo conserva las marcas porque el `Pipeline` no las consumió.
+
+**5. PySide6 6.11.2: cuatro defectos reales, no estilo.** Cada uno costó un fallo de humo antes de encontrarlo:
+- **`QColor` no acepta `rgba(...)`.** El formato de Qt es `#AARRGGBB` o `#RRGGBB`, y `QColor("rgba(...)")` deja el color inválido en silencio: la marca se pintaba transparente sin ningún error. Todos los colores del tema pasan a `#AARRGGBB`.
+- **`mapTo` entre hermanos puede tumbar el proceso.** Mapear al slider hermano desde la tira de marcas da un segmentation fault en vez de una excepción. La ruta correcta es `mapToGlobal` y de ahí al padre.
+- **El enum de grooves de `QStyle` no es utilizable en 6.11.2.** La constante pedida no está donde PySide la expone, así que la lectura de la geometría real del groove por ese enum falla. Se eliminó esa lectura y el redibujado manual del handle que dependía de ella: es código muerto y una oportunidad más de desincronizar el pintado del QSS.
+- **La geometría del groove sale del QSS, no del widget.** El groove no tiene altura garantizada por la API, pero el QSS sí la declara, así que la fórmula vive junto a la constante que la define: `QRect(0, (height - SEEK_GROOVE_HEIGHT_PX) // 2, width, SEEK_GROOVE_HEIGHT_PX)`, con `SEEK_GROOVE_HEIGHT_PX = 5` y filas medidas entre 5 y 9. Constante y geometría en el mismo módulo evita que el QSS y el pintado se separen.
+
+**6. El error de unidades que casi deja las marcas invisible.** Las posiciones del slider vienen en **segundos** y el ancho viene en **píxeles**. Tratar los segundos como píxeles dibujaba la marca pegada al inicio con cualquier duración, y con un medio largo el error era de un factor de miles. La conversión a píxeles ocurre en un único punto, y el humo lo comprueba con dos rangos de posiciones distintas.
+
+**7. Contraste comprobado, no supuesto.** La sonda de render mide el contraste real de lo pintado contra el fondo del groove en ambos temas. En oscuro: groove `#3a3c47`, relleno renderizado `#716251` con borde `#d8aa64`; contraste del relleno **1.86** y del borde **5.14**. Los valores claros se ajustaron para subir el contraste de la marca, que era el punto débil del tema claro.
+
+**8. Verificación funcional** (intérprete autoritativo del proyecto: Python 3.14.3, PySide6 6.11.2, Qt offscreen):
+| Check | Resultado |
+| --- | --- |
+| `python -m compileall app` | PASS |
+| Import de los módulos de UI | PASS |
+| `smoke_widget.py` (71 comprobaciones) | PASS: `ALL CHECKS PASSED` |
+| `smoke_main.py` | PASS: `ALL CHECKS PASSED` |
+| Sonda de render claro/oscuro y regresión | PASS: `ALL CHECKS PASSED` |
+| `git diff --check` | limpio |
+| Worktree principal | `git write-tree` sigue en `2ab1817de2f9a190b0df80bfe46c3988ef5727bc`, sin tocar |
+
+**9. Lo que falta y no está resuelto**: T4 sigue abierto por la sección de `README.md` en inglés. La prueba con el medio real de 292 MB (`C:\Users\josea\Videos\2026-09-25 16-19-06.mkv`) por la UI —marcar dos tramos disjuntos, arrancar, confirmar que el sombreado y la tira coinciden con lo que se procesa— sigue siendo manual y no está hecha.
