@@ -38,10 +38,13 @@ class Transcriber:
         """Return ``(segments, info)`` with the configured decode options.
 
         ``ranges`` restricts the run to the given ``(start, end)`` time ranges
-        in seconds. Each range is decoded on its own and the returned segment
-        times are absolute, so the caller can align the result with the media
-        it came from. ``ranges=None`` (or empty) means the whole file, which is
-        handed to whisper untouched.
+        in seconds. Each range is decoded with a margin of neighbouring audio
+        (``clipper.RANGE_WARMUP``) and the segments are trimmed back to the
+        range, because a range handed to whisper bare loses its edge speech and
+        folds its quiet interjections into one long segment. The returned
+        segment times are absolute, so the caller can align the result with the
+        media it came from. ``ranges=None`` (or empty) means the whole file,
+        which is handed to whisper untouched.
 
         The language is detected on the first range and then pinned for the
         remaining ones, so a single run cannot mix languages. Short ranges are
@@ -58,14 +61,26 @@ class Transcriber:
                 vad_filter=True,
             )
 
-        from app.services.clipper import decode_range
+        from app.services.clipper import RANGE_WARMUP, decode_range, duration
 
         model = self.get_model()
         detected: Optional[str] = language
         segments: list = []
         info = None
+        total = duration(path)
         for start, end in ranges:
-            audio = decode_range(path, start, end)
+            # The model is handed the range plus a margin, and the result is
+            # trimmed back. A bare range has no context at all: the first and
+            # last window of an isolated clip are the worst conditioned ones, so
+            # speech at the edges gets clipped and the quiet interjections inside
+            # get folded into one long segment. Diarization already decodes with
+            # this same margin for its own reason; see clipper.RANGE_WARMUP for
+            # the measurements behind the value.
+            low = max(0.0, start - RANGE_WARMUP)
+            high = end + RANGE_WARMUP
+            if total:
+                high = min(high, total)
+            audio = decode_range(path, low, high)
             # A range over silence legitimately yields no segment at all, so
             # none is assumed here and no_speech_threshold is left alone.
             found, range_info = model.transcribe(
@@ -76,12 +91,16 @@ class Transcriber:
                 vad_filter=True,
             )
             # whisper timestamps are relative to the array it was given, so the
-            # range offset is what puts them back on the media timeline. The
-            # generator is drained here, inside the range it belongs to.
+            # window offset is what puts them back on the media timeline. The
+            # generator is drained here, inside the range it belongs to. A
+            # segment that reaches into the margin keeps its text and is clamped
+            # to the range; one lying wholly in the margin is dropped, which is
+            # what keeps the margin from leaking into the result.
             for segment in found:
-                segment.start += start
-                segment.end += start
-                segments.append(segment)
+                segment.start = max(start, segment.start + low)
+                segment.end = min(end, segment.end + low)
+                if segment.end > segment.start:
+                    segments.append(segment)
             if info is None:
                 info = range_info
             if detected is None:

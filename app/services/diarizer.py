@@ -31,13 +31,6 @@ class Diarizer:
                 self._pipeline.to(torch.device("cuda"))
         return self._pipeline
 
-    #: Seconds of audio decoded on each side of a range before diarizing it.
-    #: The speaker clustering needs neighbouring speech to stay stable: a bare
-    #: 12 s range of the reference media came back with different speaker labels
-    #: and 2 turns instead of 5, while this margin reproduces a whole-file run
-    #: to within 30 ms.
-    RANGE_WARMUP = 15.0
-
     def diarize(self, path: str, ranges: Optional[list[tuple[float, float]]] = None):
         """Return speaker turns as a list of ``(start, end, speaker_label)``.
 
@@ -73,13 +66,19 @@ class Diarizer:
         """
         import torch
 
-        from app.services.clipper import SAMPLE_RATE, decode_range, duration
+        from app.services.clipper import RANGE_WARMUP, SAMPLE_RATE, decode_range, duration
 
         total = duration(path)
         turns: list[tuple[float, float, str]] = []
         for start, end in ranges:
-            low = max(0.0, start - self.RANGE_WARMUP)
-            high = end + self.RANGE_WARMUP
+            # The clustering needs neighbouring speech to stay stable: a bare
+            # 12 s range of the reference media came back with different speaker
+            # labels and 2 turns instead of 5, while this margin reproduces a
+            # whole-file run to within 30 ms. The transcription path decodes
+            # with the same margin for the same class of reason, so the value
+            # is canonical in clipper.RANGE_WARMUP.
+            low = max(0.0, start - RANGE_WARMUP)
+            high = end + RANGE_WARMUP
             if total:
                 high = min(high, total)
             audio = decode_range(path, low, high)
