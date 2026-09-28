@@ -8,7 +8,7 @@ it (no WA_DeleteOnClose), so a later video play can show it again.
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QRegion
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -23,12 +23,49 @@ from PySide6.QtWidgets import (
 from app.ui.seek_slider import MarksStrip, SeekSlider
 
 
+class _DoubleClickForwarder(QObject):
+    """Turn a double-click on the video image into a ``play_toggled`` pulse.
+
+    ``QVideoWidget`` is a plain widget as far as Qt is concerned, so the
+    double-click does reach it (MEASURED on PySide6 6.11.2: both an event
+    filter on it and a ``mouseDoubleClickEvent`` override receive the event,
+    through ``QTest.mouseDClick`` and through a synthesised
+    ``MouseButtonDblClick`` alike). An event filter is used instead of a
+    subclass because the widget is created in one place here and must stay a
+    plain ``QVideoWidget`` for ``setVideoOutput``.
+
+    The emitted bool is the widget's own "currently playing" answer, asked from
+    the window: MainWindow then plays or pauses to match, exactly as it does
+    for a click on the button, and the button's checked state is re-synced from
+    the real player state afterwards, so there is no second source of truth.
+    """
+
+    def __init__(self, window: "VideoPlayerWindow", target: QObject) -> None:
+        super().__init__(window)
+        self._window = window
+        target.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.MouseButtonDblClick:
+            return False
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        self._window.toggle_play_from_video()
+        # Not consumed: the click still reaches the widget's own handler, which
+        # is what keeps any default behaviour of the video surface intact.
+        return False
+
+
 class VideoPlayerWindow(QWidget):
     """Top-level video surface: QVideoWidget + play/pause + SeekSlider + time.
 
     The in/out marks of the loaded media are shaded on the slider and mirrored
     as ``{``/``}`` braces on the strip under it; both are driven from here so
     this window shows exactly what the main window's bar shows.
+
+    A double-click on the video image toggles play/pause, going through the same
+    ``play_toggled`` signal as the button so there is a single play/pause path
+    and a single piece of state.
 
     Signals:
         play_toggled(bool): the user clicked the play/pause button; MainWindow
@@ -64,6 +101,8 @@ class VideoPlayerWindow(QWidget):
 
         self.video_widget = QVideoWidget(self)
         layout.addWidget(self.video_widget, stretch=1)
+        # Double-clicking the image toggles play/pause, like the button does.
+        self._double_click = _DoubleClickForwarder(self, self.video_widget)
 
         controls = QWidget(self)
         controls.setObjectName("videoControls")
@@ -179,6 +218,18 @@ class VideoPlayerWindow(QWidget):
         self.marks_strip.set_marks_editable(editable)
 
     # -- internals ------------------------------------------------------------
+    def toggle_play_from_video(self) -> None:
+        """A double-click on the video image asked to toggle playback.
+
+        Routed through ``play_toggled`` with the button's own checked state, so
+        the toggle goes down exactly the path a click on the button goes down
+        (MainWindow -> play/pause) and the button stays the single piece of UI
+        state. A double-click also delivers a press first, and a press without
+        a release would otherwise leave the button's check out of step with the
+        player.
+        """
+        self.play_button.click()
+
     def _on_slider_released(self) -> None:
         self.seek_released.emit(self.slider.value())
         self._sync_label()
