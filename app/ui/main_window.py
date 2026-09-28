@@ -439,7 +439,21 @@ class MainWindow(QMainWindow):
         # The marks are an INPUT of this run, not UI state: read them here,
         # before the worker starts, so the decision cannot be changed between
         # reading and running. None means no marks and scopes nothing.
-        ranges = item.marks if item is not None else None
+        #
+        # The run targets the SELECTED row, because the transcript and
+        # translation panes have always been per selection. The marks painted in
+        # both players belong to the LOADED media instead, because their
+        # geometry is a fraction of the loaded media's duration. Those are two
+        # different files as soon as the user clicks another row while something
+        # is playing, and the marks of one can only scope a run of the other
+        # when the two ARE the same file, so a diverged run is unscoped and
+        # says so (see _marks_scope_note).
+        #
+        # _playing_path is read HERE, on purpose: _stop_playback() below sets it
+        # to None, so after that line the loaded media is unknowable.
+        diverged = self._playing_path is not None and self._playing_path != path
+        scope_note = self._marks_scope_note()
+        ranges = item.marks if (item is not None and not diverged) else None
         self._run_used_marks = bool(ranges)
 
         self._stop_playback(reset_status=False)
@@ -460,10 +474,15 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         # A scoped run returns only part of the media, so the status says so
         # before the first segment arrives instead of surprising the user with
-        # a short transcript.
-        self.status_label.setText(
-            "Iniciando… (solo los tramos marcados)" if ranges else "Iniciando…"
-        )
+        # a short transcript. The parenthesised scope is ALWAYS there now: a run
+        # with no marks is the whole file, and saying only "Iniciando…" left the
+        # user unable to tell the two cases apart while marks were on screen.
+        # The note then says WHY those marks are not in force.
+        scope = "solo los tramos marcados" if ranges else "archivo completo"
+        start_text = f"Iniciando… ({scope})"
+        if scope_note:
+            start_text = f"{start_text}. {scope_note}"
+        self.status_label.setText(start_text)
         self._set_busy(True)
 
         def runnable(path, on_segment, on_progress, on_status) -> RunResult:
@@ -531,21 +550,19 @@ class MainWindow(QMainWindow):
             return
         self._stop_playback(reset_status=False)
         self._playing_path = path
-        # Reset the seek bar for the new source; durationChanged re-ranges it.
+        # Reset the timeline for the new source; _load_source re-establishes it
+        # for this media (a re-entry of the same file announces no new duration,
+        # so the re-range cannot wait for a signal). Nothing of the previous
+        # source may survive into this one: no range, no painted mark, no pending
+        # start.
         self._seeking = False
-        self._duration_ms = 0
-        self.seek_slider.setValue(0)
-        self.time_label.setText("00:00 / 00:00")
-        # Nothing of the previous source may survive into this one: no marks
-        # painted and no pending start. The new media's own marks are painted
-        # by _on_duration_changed, once its duration is known.
         self._pending_in = None
-        self._push_marks_to_players(None)
+        self._establish_timeline(0)
         if self._is_video(path):
             self._start_video(path)
         else:
             self.playback_bar.setVisible(True)
-            self.player.setSource(QUrl.fromLocalFile(path))
+            self._load_source(path)
             self.player.play()
             self.media_list.set_playing(path)
             self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
@@ -556,7 +573,7 @@ class MainWindow(QMainWindow):
         window.reset()
         window.set_source_title(path)
         self.player.setVideoOutput(window.video_widget)
-        self.player.setSource(QUrl.fromLocalFile(path))
+        self._load_source(path)
         self.player.play()
         self.media_list.set_playing(path)
         window.show()
@@ -612,17 +629,19 @@ class MainWindow(QMainWindow):
         self.media_list.set_stopped(self._playing_path)
         self._playing_path = None
         self._seeking = False
-        self._duration_ms = 0
-        self.seek_slider.setValue(0)
-        self.time_label.setText("00:00 / 00:00")
         self.playback_bar.setVisible(False)
         if self.video_window is not None:
             self.video_window.set_playing_state(False)
             self.video_window.hide()
         # No media is loaded any more, so no mark can be painted: a start mark
-        # left pending would otherwise leak into the next source.
+        # left pending would otherwise leak into the next source. The clearing
+        # goes through _establish_timeline(0) because that is the ONLY place
+        # that ranges a slider: assigning _duration_ms here left both bars
+        # ranged to the media that had just stopped while the marks were gone,
+        # i.e. range and marks disagreeing again -- the very invariant this
+        # method exists to keep.
         self._pending_in = None
-        self._push_marks_to_players(None)
+        self._establish_timeline(0)
         if reset_status:
             self.status_label.setText("Listo.")
 
@@ -647,18 +666,78 @@ class MainWindow(QMainWindow):
         )
 
     def _on_duration_changed(self, duration: int) -> None:
-        self._duration_ms = duration
-        self.seek_slider.setRange(0, duration)
-        # Video playback transports in its own window; the main bar stays
-        # hidden for videos (it reappears on the next audio source).
-        if self._playing_path is None or not self._is_video(self._playing_path):
+        # Qt refines the duration while the media loads. The timeline is
+        # rebuilt from the same single place the hand-over call uses, so range
+        # and marks cannot be set by two different paths.
+        self._establish_timeline(duration)
+
+    def _load_source(self, path: str) -> None:
+        """Hand ``path`` to the player and re-establish the timeline for it.
+
+        Every ``setSource`` in this window goes through here. That is what makes
+        the timeline follow the LOADED media even when the player stays silent
+        about it; see :meth:`_establish_timeline` for the measurement behind
+        that.
+        """
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self._establish_timeline()
+
+    def _establish_timeline(self, duration: int | None = None) -> None:
+        """Rebuild the seek range AND the mark painting from one duration.
+
+        The only place that ranges a slider, and it paints the marks in the same
+        breath from the same duration and the same ``_playing_path``. Both views
+        of the timeline therefore share one denominator and cannot drift apart,
+        and a media whose duration is unknown gets neither a range nor marks:
+        there is nothing to place a mark against.
+
+        ``duration=None`` asks the player instead of trusting an announced value.
+
+        WHY THE CALLER MUST ASK, NOT ONLY LISTEN. The bug this replaces was a
+        video window that stopped advancing its timeslider, and stopped showing
+        the marks, after re-entering a file it had already played: ``reset()``
+        left the range at ``0..0``, ``update_position`` clamped the value to 0
+        and ``_load_marks_for`` never ran, so both symptoms were the single fact
+        that ``_on_duration_changed`` was the only thing that could restore the
+        timeline. MEASURED on PySide6 6.11.2 with the ffmpeg backend, offscreen,
+        for both a 30 s wav and the 292 s MKV: setting a source that is ALREADY
+        the player's source emits NO LoadingMedia, NO sourceChanged, NO
+        durationChanged and NO LoadedMedia -- only BufferingMedia /
+        BufferedMedia plus the transition to PlayingState. The backend keeps the
+        loaded media, so ``player.duration()`` still answers correctly on the
+        very next line, but nothing announces it.
+
+        Forcing a real source change (``setSource(QUrl())`` before the real URL)
+        does bring durationChanged back, verified, but it re-probes the file on
+        every entry and throws the timeline away for one event, so the app asks
+        the player for the duration it already has instead of making it work for
+        a notification.
+
+        The same measurement settles the other half, WHY IT IS SAFE TO ASK
+        UNCONDITIONALLY: on a genuinely NEW source ``player.duration()`` answers
+        0 on the very next line -- never the previous media's value -- and
+        durationChanged arrives with the real one shortly after. So asking can
+        never place the new media's marks along the old media's timeline; the
+        worst it does is range nothing for the fraction of a second before the
+        signal lands, and a media whose duration is genuinely unknown gets no
+        range and no marks, which is the truth.
+        """
+        known = int(self.player.duration()) if duration is None else int(duration)
+        self._duration_ms = max(0, known)
+        self.seek_slider.setRange(0, self._duration_ms)
+        if self.video_window is not None:
+            self.video_window.set_duration(self._duration_ms)
+        # The marks are read for the LOADED media, which is the media whose
+        # duration just became the denominator of their geometry, and they are
+        # cleared outright when there is no timeline to place them on.
+        self._load_marks_for(self._playing_path if self._duration_ms > 0 else None)
+        if self._duration_ms > 0 and (
+            self._playing_path is None or not self._is_video(self._playing_path)
+        ):
+            # Video playback transports in its own window; the main bar stays
+            # hidden for videos (it reappears on the next audio source).
             self.playback_bar.setVisible(True)
         self._sync_time_label(self.seek_slider.value())
-        if self.video_window is not None:
-            self.video_window.set_duration(duration)
-        # The duration is the denominator of the mark geometry, so this is the
-        # first moment the stored marks can be placed on the timeline.
-        self._load_marks_for(self._playing_path)
 
     def _on_position_changed(self, position: int) -> None:
         if self._seeking:
@@ -692,6 +771,33 @@ class MainWindow(QMainWindow):
         self.seek_slider.set_marks(marks, self._duration_ms, self._pending_in)
         if self.video_window is not None:
             self.video_window.set_marks(marks, self._duration_ms, self._pending_in)
+
+    def _marks_scope_note(self) -> str:
+        """Why the painted marks will NOT scope a run of the selected media.
+
+        Empty when there is nothing to explain. The marks painted in both
+        players belong to the LOADED media, whose duration is the denominator of
+        their geometry; a run targets the SELECTED row, because the transcript
+        and translation panes have always been per selection. The two are
+        different files as soon as the user clicks another row while something
+        is playing, and marks of one can only scope a run of the other when the
+        two ARE the same file. So the difference is stated instead of silently
+        running the whole of a media whose marks are painted on screen.
+
+        With nothing loaded there is no divergence: the marks are the selected
+        media's own stored ones, no other file is on screen to be confused with,
+        and the run-start status already says whether they are in force.
+        """
+        loaded = self._playing_path
+        if loaded is None:
+            return ""
+        selected = self.media_list.selected_path()
+        if selected is None or selected == loaded:
+            return ""
+        return (
+            f"Marcas de «{Path(loaded).stem}» (el medio cargado): no acotan "
+            f"«{Path(selected).stem}», que es el seleccionado para transcribir."
+        )
 
     def _load_marks_for(self, path: str | None) -> None:
         """Paint the stored marks of ``path`` in both players.
@@ -857,7 +963,17 @@ class MainWindow(QMainWindow):
         self.repository.update_results(idx, **payload)
 
     def _on_selection_changed(self) -> None:
-        """Restore edited notes over the original base results, if present."""
+        """Restore edited notes over the original base results, if present.
+
+        It also announces a marks/selection divergence the moment it exists.
+        The marks stay painted, because they are the LOADED media's and their
+        geometry is true for what is loaded -- clearing them would be a lie in
+        the other direction ("this media has no marks") and would take away the
+        user's ability to edit or remove them. Leaving them up silently is what
+        made the run read as scoped by marks that were not scoping it, so the
+        status line names the two files instead. :meth:`_run` repeats the same
+        note at run start, when the scope actually matters.
+        """
         self._flush_notes_autosave()
         path = self.media_list.selected_path()
         self._scroll_sync_eligible = False
@@ -893,6 +1009,9 @@ class MainWindow(QMainWindow):
         )
         self._refresh_scroll_sync()
         self._refresh_buttons()
+        note = self._marks_scope_note()
+        if note:
+            self.status_label.setText(note)
 
     def _on_failed(self, message: str) -> None:
         if self._run_snapshot is not None:
