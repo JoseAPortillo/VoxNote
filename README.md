@@ -35,6 +35,7 @@ optional PyAnnote for speaker diarization. Validated on Windows with Python
 
 - Drag & drop media files (mp4, mkv, webm, mov, avi, m4v, mp3, wav, m4a, flac, ogg, aac, opus, wma)
 - Transcribe (original language) or translate (default target: Spanish — configurable)
+- Mark in/out ranges on the timeslider to transcribe or translate only a fragment of a long file; several disjoint ranges are supported
 - Optional speaker diarization with `[Hablante N]` labels; it must be explicitly enabled and requires `HF_TOKEN`
 - Dual panes: original transcription + translation, persisted per file
 - Freely editable multiline notes in both panes, autosaved per media file
@@ -70,7 +71,39 @@ transcription and translation.
 
 Audio playback uses the main window, with a seek bar and elapsed/total time.
 Video files open a dedicated window with a video surface, play/pause, seek, and
-elapsed/total time controls.
+elapsed/total time controls; double-clicking the video image toggles play/pause.
+
+### Mark a range to transcribe or translate
+
+Long recordings often only need a fragment. On the audio player's seek bar — or
+the video window's — right-click to open the mark menu:
+
+- `Marcar inicio en …` sets the in point at the current position.
+- `Marcar fin en …` sets the out point, closing the range.
+- `Quitar el tramo …` removes a single range; the menu names that range and its
+  endpoints, so you remove the one you meant. When the click misses every range
+  the generic `Quitar el tramo bajo el cursor` is offered instead.
+- `Limpiar todas las marcas` clears every range.
+
+Marked ranges are shaded over the groove, with a `{` / `}` tick strip below it.
+An in point you have not closed yet shows as a dimmed tick, so a half-finished
+range stays visible. Several disjoint ranges are allowed: they are kept sorted
+and overlaps are merged, so marking generously is safe.
+
+A run processes only the marked ranges and timestamps the result against the
+**original** file, so the generated SRT lines up with the full media. Translation
+uses the marked range the same way. With no marks the whole file is processed and
+behavior is unchanged.
+
+Marks belong to the media **currently loaded** — the one you hear — and persist
+across restarts. A successful run consumes them and clears them, because they
+were that run's input; a failed run keeps them so you can retry.
+
+The run itself follows the **selected** row in the list, while the mark geometry
+follows the loaded media's duration. If those two differ — media A is loaded and
+marked, but you have selected row B — the run falls back to the whole file and
+says so in the status bar, instead of quietly processing a different file than
+the one you marked.
 
 ### Edit and export notes
 
