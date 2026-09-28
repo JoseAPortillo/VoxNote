@@ -6,13 +6,16 @@ here gives the feature to both at once.
 
 Marks live on the media timeline in SECONDS while both players seek in
 MILLISECONDS. That conversion happens in exactly one place,
-:meth:`SeekSlider.mark_pixel_rects`, which maps seconds onto the groove rect
+:meth:`SeekSlider._x_at_seconds`, which maps seconds onto the groove rect
 :class:`SeekSlider.groove_rect` derives from the stylesheet metrics. That rect
 is not guessed: it is built from the same constants the stylesheet itself is
 generated from, and it was confirmed against the pixels PySide6 6.11.2
 actually paints. :class:`MarksStrip` then reads those very same rects, so the
 shading on the groove and the ``{``/``}`` braces underneath cannot
-desynchronize: there is a single geometry behind both.
+desynchronize: there is a single geometry behind both, and a start mark that is
+still waiting for its end is drawn on it too
+(:meth:`SeekSlider.pending_pixel_rect`), so the gesture is visible from the
+first click and lands exactly where the committed band will.
 
 The widget owns no persistence. Every edit is applied in memory, normalized,
 and announced through :attr:`SeekSlider.marks_edited`; the owner (the main
@@ -49,6 +52,18 @@ DEFAULT_MARK_EDGE = "#ffc46b"
 
 # A very short range can round to zero groove pixels; keep it visible.
 MIN_MARK_WIDTH_PX = 3
+
+# The pending start (an ``in`` with no ``out`` yet) is a tick of this width.
+# Same width as MIN_MARK_WIDTH_PX on purpose: it is the width a just-closed
+# range would have, so committing it does not resize anything.
+PENDING_MARK_WIDTH_PX = 3
+
+# Painted as a DASHED outline over a partly transparent fill, while a committed
+# range is a solid outline over the shaded band. Two signals, because at 3 px
+# either one alone is weak: an unfilled dashed outline is too faint to see on
+# its own, and a solid tick is easy to mistake for a very short range.
+PENDING_MARK_DASH = [2.0, 2.0]
+PENDING_MARK_FILL_ALPHA = 140
 
 # Height of the brace row under the groove.
 STRIP_HEIGHT = 20
@@ -88,11 +103,14 @@ class SeekSlider(QSlider):
 
     On top of that it paints the in/out marks of the selected media: every
     marked range is shaded over the real groove and mirrored as a ``{``/``}``
-    pair by the :class:`MarksStrip` placed underneath. A right-click opens a
-    menu to mark the start, mark the end, remove the range under the cursor or
-    clear every mark; the first two act on the current playback position, which
-    the slider mirrors in its own value, and both show the position they will
-    use so the behavior needs no documentation.
+    pair by the :class:`MarksStrip` placed underneath. A start mark with no end
+    yet is painted too, as a dashed tick and a lone ``{``, so the gesture is
+    visible from the first click. A right-click opens a menu to mark the start,
+    mark the end, remove the range under the cursor -- named with its own start
+    and end when the click landed on one -- or clear every mark; the first two
+    act on the current playback position, which the slider mirrors in its own
+    value, and both show the position they will use so the behavior needs no
+    documentation.
 
     Default QSlider moves by page-step on click; this overrides that with
     ``QStyle.sliderValueFromPosition``. Standard signals (sliderPressed,
@@ -124,7 +142,8 @@ class SeekSlider(QSlider):
         self.setAccessibleName("Barra de posición del medio")
         self.setToolTip(
             "Clic para buscar. Clic derecho: marcar inicio, marcar fin, "
-            "quitar el tramo bajo el cursor o limpiar todas las marcas."
+            "quitar el tramo bajo el cursor (indica sus extremos) o limpiar "
+            "todas las marcas."
         )
 
     def _value_at(self, x: int) -> int:
@@ -194,6 +213,21 @@ class SeekSlider(QSlider):
         return self._marks_editable
 
     # -- geometry ------------------------------------------------------------
+    def _x_at_seconds(self, seconds: float) -> int:
+        """Left-edge pixel of ``seconds`` on the groove: the ONE x mapping.
+
+        Clamped to the timeline and rounded the way the rest of this module
+        rounds. Both the committed bands and the pending start tick go through
+        it, which is what makes "the tick is where the band will start" true by
+        construction rather than by two copies of the same formula agreeing.
+        """
+        groove = self.groove_rect()
+        total_s = self._duration_ms / 1000.0
+        if total_s <= 0:
+            return groove.left()
+        ratio = min(max(float(seconds), 0.0), total_s) / total_s
+        return groove.left() + int(ratio * groove.width() + 0.5)
+
     def groove_rect(self) -> QRect:
         """The groove rect the style really paints, in widget coordinates.
 
@@ -225,13 +259,19 @@ class SeekSlider(QSlider):
     def mark_pixel_rects(self) -> list[QRect]:
         """One rect per marked range, laid over the real groove.
 
-        The only place where seconds become pixels: a mark is a fraction of
-        the media duration, and that fraction is mapped onto the groove rect,
-        so the shading always sits on the groove and under the handle whatever
-        the style or the theme. Marks are stored in seconds while the duration
-        is kept in milliseconds (the unit both players seek in), so the
-        conversion happens exactly here. Disjoint ranges produce disjoint
+        The only place where a RANGE becomes a rect: a mark is a fraction of the
+        media duration, and that fraction is mapped onto the groove rect, so the
+        shading always sits on the groove and under the handle whatever the style
+        or the theme. Marks are stored in seconds while the duration is kept in
+        milliseconds (the unit both players seek in), so the conversion happens
+        exactly here, in :meth:`_x_at_seconds`. Disjoint ranges produce disjoint
         rects.
+
+        A range that cannot be drawn is DROPPED, not clamped: one that ends at
+        or past the end of the media, or a zero-width timeline. Callers that map
+        a click back to a stored range must therefore check that the rects and
+        the marks are the same length before pairing them up by index
+        (see :meth:`_hit_index`).
         """
         marks = self._marks
         if not marks or self._duration_ms <= 0:
@@ -248,8 +288,8 @@ class SeekSlider(QSlider):
             end_s = min(max(float(end), 0.0), total_s)
             if end_s <= start_s:
                 continue
-            x0 = left + int(start_s / total_s * span + 0.5)
-            x1 = left + int(end_s / total_s * span + 0.5)
+            x0 = self._x_at_seconds(start_s)
+            x1 = self._x_at_seconds(end_s)
             if x1 - x0 < MIN_MARK_WIDTH_PX:
                 x1 = x0 + MIN_MARK_WIDTH_PX
             if x1 > left + span:
@@ -257,6 +297,29 @@ class SeekSlider(QSlider):
                 x1 = left + span
             rects.append(QRect(x0, groove.top(), x1 - x0, groove.height()))
         return rects
+
+    def pending_pixel_rect(self) -> QRect | None:
+        """The pending start as a tick over the groove, or ``None``.
+
+        Left-aligned on the column where the band will start, computed by the
+        same mapping the bands use, so marking the end only THICKENS the tick
+        instead of moving it. The one clamp is the last ``PENDING_MARK_WIDTH_PX``
+        pixels of the timeline, where a tick that kept its left edge would hang
+        off the groove.
+
+        ``None`` without a pending start or without a duration: with no timeline
+        there is no position to convert seconds against.
+        """
+        if self._pending_in is None or self._duration_ms <= 0:
+            return None
+        groove = self.groove_rect()
+        if groove.width() <= 0 or groove.height() <= 0:
+            return None
+        width = min(PENDING_MARK_WIDTH_PX, groove.width())
+        left = min(
+            self._x_at_seconds(self._pending_in), groove.left() + groove.width() - width
+        )
+        return QRect(left, groove.top(), width, groove.height())
 
     def _position_seconds_at(self, x: int) -> float:
         """Seconds under widget ``x``, read through the painting groove.
@@ -277,6 +340,11 @@ class SeekSlider(QSlider):
     def paintEvent(self, event) -> None:
         """Paint the style, then shade the marked ranges over the groove.
 
+        A pending start is painted too, as a dashed tick, and FIRST, so the
+        committed bands always win where the two overlap: a band starting at
+        the pending column covers it rather than the other way round, which is
+        exactly what happens when the user marks the end.
+
         The handle is deliberately NOT repainted on top of the bands. The style
         cannot report where it is on PySide6 6.11.2 (see :meth:`groove_rect`),
         so there is no rect to clip such a redraw to, and deriving one here
@@ -296,12 +364,25 @@ class SeekSlider(QSlider):
         never disappears, so the old repaint bought nothing.
         """
         super().paintEvent(event)
+        pending = self.pending_pixel_rect()
         rects = self.mark_pixel_rects()
-        if not rects:
+        if not rects and pending is None:
             return
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if pending is not None:
+                edge = theme_color("markEdgeColor", DEFAULT_MARK_EDGE)
+                fill = QColor(edge)
+                fill.setAlpha(PENDING_MARK_FILL_ALPHA)
+                pen = QPen(edge, 1.0)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                pen.setDashPattern(PENDING_MARK_DASH)
+                painter.setBrush(fill)
+                painter.setPen(pen)
+                painter.drawRect(pending)
+            if not rects:
+                return
             painter.setBrush(theme_color("markFillColor", DEFAULT_MARK_FILL))
             painter.setPen(QPen(theme_color("markEdgeColor", DEFAULT_MARK_EDGE), 1.0))
             radius = min(2.0, max(1.0, rects[0].height() / 4.0))
@@ -317,28 +398,78 @@ class SeekSlider(QSlider):
             painter.end()
 
     # -- context menu --------------------------------------------------------
+    def _hit_index(self, x: int) -> int | None:
+        """Index of the marked range a right-click at widget ``x`` landed on.
+
+        Two tests, in this order, because each covers what the other misses.
+
+        1. The PAINTED rect, because that is what the user actually clicked. It
+           is only trusted when the painted rects line up one-to-one with the
+           stored marks: :meth:`mark_pixel_rects` DROPS a range it cannot draw
+           (one that ends past the media, or no timeline at all), so pairing
+           survivors by index could name -- and remove -- the wrong range.
+        2. The seconds under the click, through :meth:`_position_seconds_at`,
+           the same mapping the painting uses, so no second conversion exists.
+
+        The painted rect is the one that matters most: a range shorter than
+        ``MIN_MARK_WIDTH_PX`` is widened when painted, so a click on the extra
+        columns maps to a position just outside the stored pair and the seconds
+        test alone would refuse to remove a mark the user is visibly clicking.
+        """
+        marks = self._marks or []
+        rects = self.mark_pixel_rects()
+        if len(rects) == len(marks):
+            for index, rect in enumerate(rects):
+                if rect.left() <= x <= rect.right():
+                    return index
+        position_s = self._position_seconds_at(x)
+        for index, (start, end) in enumerate(marks):
+            if start <= position_s <= end:
+                return index
+        return None
+
     def _on_context_menu(self, pos) -> None:
-        """Offer the four mark actions, each labelled with what it will do."""
+        """Offer the mark actions, each labelled with what it will do.
+
+        The removal names the range under the cursor when the click resolved to
+        one, so the user removes a specific mark instead of trusting a generic
+        label. When the click is not on any range the generic wording is kept
+        (and stays enabled whenever there are marks at all), which is what the
+        menu said before the click was resolved.
+        """
         if not self._marks_editable or self._duration_ms <= 0:
             # Without a loaded media there is no timeline to place a mark on.
             return
         at = format_position(self.value())
+        hit = self._hit_index(pos.x())
         menu = QMenu(self)
         action_in = menu.addAction(f"Marcar inicio en {at}")
         action_out = menu.addAction(f"Marcar fin en {at}")
         menu.addSeparator()
-        action_remove = menu.addAction("Quitar el tramo bajo el cursor")
+        if hit is None:
+            action_remove = menu.addAction("Quitar el tramo bajo el cursor")
+        else:
+            start, end = self._marks[hit]
+            action_remove = menu.addAction(
+                f"Quitar el tramo {format_position(round(start * 1000))}"
+                f"–{format_position(round(end * 1000))}"
+            )
         action_clear = menu.addAction("Limpiar todas las marcas")
         has_marks = bool(self._marks)
         action_remove.setEnabled(has_marks)
-        action_clear.setEnabled(has_marks)
+        # A pending start is a mark the user can see and wants gone, and
+        # _clear_marks() drops it, so the action is enabled for it too.
+        action_clear.setEnabled(has_marks or self._pending_in is not None)
         chosen = menu.exec(self.mapToGlobal(pos))
         if chosen is action_in:
             self._mark_in(self.value() / 1000.0)
         elif chosen is action_out:
             self._mark_out(self.value() / 1000.0)
         elif chosen is action_remove:
-            self._remove_under_cursor(self._position_seconds_at(pos.x()))
+            if hit is not None:
+                self._remove_range(hit)
+            else:
+                self._remove_under_cursor(self._position_seconds_at(pos.x()))
         elif chosen is action_clear:
             self._clear_marks()
 
@@ -384,8 +515,34 @@ class SeekSlider(QSlider):
             f"a {format_position(round(end_s * 1000))}.",
         )
 
+    def _remove_range(self, index: int) -> None:
+        """Drop stored range ``index`` and say which one went.
+
+        The single writer of a removal: the context menu and the seconds
+        fallback both land here, so the range named in the status is the range
+        that was actually removed. ``index`` comes from :meth:`_hit_index`, which
+        never returns an index it cannot have drawn.
+        """
+        marks = self._marks
+        if not marks or not 0 <= index < len(marks):
+            self._publish(marks, "No hay ningún tramo de marcado que quitar.")
+            return
+        start, end = marks[index]
+        kept = marks[:index] + marks[index + 1:]
+        self._publish(
+            kept,
+            f"Tramo quitado: {format_position(round(start * 1000))}"
+            f"–{format_position(round(end * 1000))}.",
+        )
+
     def _remove_under_cursor(self, position_s: float) -> None:
-        """Drop the range the cursor sits on, or say that there is none."""
+        """Drop the range containing ``position_s``, or say that there is none.
+
+        The seconds-based counterpart of :meth:`_hit_index`, kept for the click
+        that resolved to no rect: it still goes through the same containment
+        test the old removal used, so a click just outside a band changes
+        nothing and explains itself.
+        """
         marks = self._marks
         if not marks:
             self._publish(marks, "No hay marcas que quitar.")
@@ -412,10 +569,11 @@ class MarksStrip(QWidget):
     """Read-only row of ``{``/``}`` braces under a :class:`SeekSlider`.
 
     It computes no geometry of its own: every brace is placed at the edges of a
-    rect returned by :meth:`SeekSlider.mark_pixel_rects`, the same rects the
-    slider fills with the shading, so the two views cannot drift apart. Being a
-    real widget in the layout is what makes it follow the window on resize, and
-    it carries a Spanish accessible name and tooltip.
+    rect returned by :meth:`SeekSlider.mark_pixel_rects` (or at the left edge of
+    :meth:`SeekSlider.pending_pixel_rect` for a start mark that has no end yet),
+    the same rects the slider fills with the shading, so the two views cannot
+    drift apart. Being a real widget in the layout is what makes it follow the
+    window on resize, and it carries a Spanish accessible name and tooltip.
     """
 
     def __init__(self, slider: SeekSlider, parent=None) -> None:
@@ -475,8 +633,18 @@ class MarksStrip(QWidget):
         )
 
     def paintEvent(self, event) -> None:
+        """Draw the pending ``{`` first, then a brace per committed range.
+
+        The pending start is the very brace its committed range will keep, on
+        the very rect edge the band will start at, in the muted colour and with
+        no ``}`` beside it: so the glyph the user sees from the first click does
+        not move when the end arrives, and the missing ``}`` is what says the
+        range is not closed yet. Committed braces are painted after it, so they
+        win where the two overlap.
+        """
         rects = self._slider.mark_pixel_rects()
-        if not rects:
+        pending = self._slider.pending_pixel_rect()
+        if not rects and pending is None:
             return
         offset = self._x_offset()
         font = QFont(self.font())
@@ -485,13 +653,20 @@ class MarksStrip(QWidget):
         try:
             painter.setFont(font)
             metrics = QFontMetrics(font)
+            baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
+            glyph_w = metrics.horizontalAdvance("W")
+            if pending is not None:
+                painter.setPen(
+                    QPen(QColor(self.palette().color(QPalette.ColorRole.PlaceholderText)))
+                )
+                self._draw_brace(painter, "{", pending.left() + offset, baseline, glyph_w)
+            if not rects:
+                return
             if self._editable:
                 color = theme_color("markEdgeColor", DEFAULT_MARK_EDGE)
             else:
                 color = QColor(self.palette().color(QPalette.ColorRole.PlaceholderText))
             painter.setPen(QPen(color))
-            baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
-            glyph_w = metrics.horizontalAdvance("W")
             for rect in rects:
                 left = rect.left() + offset
                 right = rect.right() + offset
