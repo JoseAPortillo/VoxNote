@@ -36,6 +36,15 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 - [x] T3: `paintEvent` en `app/ui/seek_slider.py` para el sombreado, tira de marcas debajo con `{` y `}`, menú contextual (marcar inicio, marcar fin, quitar marcas, limpiar), y cableado de `seek_slider` y de `video_window.slider` al mismo modelo por medio seleccionado. Ver [Evidencia](#evidencia).
 - [ ] T4: documentación. Los checks de `compileall`, smoke Qt offscreen y `git diff --check` ya se ejecutaron como evidencia de T3; queda la sección en `README.md` en inglés.
 
+### Regresiones de la prueba manual (2026-09-27)
+Cinco hallazgos del usuario en la prueba manual con el MKV real. T5 y T6 son defectos reales de cableado; T7 y T8 son usabilidad; T9 es una función nueva. El humo de T3 no los cubrió porque ejercía los widgets de forma aislada y nunca el ciclo real play→marcar→volver a entrar.
+
+- [x] T5 (**correctitud, prioridad máxima**): la ejecución y las marcas se keyedian de forma distinta. `_on_marks_edited` escribe con `self._playing_path`, pero `_run` lee con `path = self.media_list.selected_path()` y saca `ranges` de esa fila. Con el medio A sonando y marcado y la fila B seleccionada, `ranges` salía de B y el resultado no correspondía a lo marcado. **Decisión del mantenedor (2026-09-27): la ejecución es la de la fila seleccionada**, porque los paneles de transcripción y traducción son por selección. La geometría de las marcas, en cambio, la fija la duración del medio **cargado**, así que la barra sigue siendo del medio cargado. La consecuencia inevitable es que ambas cosas pueden diferir, y el arreglo no puede ser fingir que no: una ejecución divergida queda **sin acotar y lo declara**, en la línea de estado al cambiar de selección y otra vez al arrancar. Ver [Evidencia](#evidencia).
+- [x] T6 (**funcional**): el timeslider de la ventana de video dejaba de avanzar al volver a entrar en el video. La hipótesis se **verificó antes de arreglar**, y era correcta: `setSource` con la MISMA URL no emite nada. Ver [Evidencia](#evidencia).
+- [x] T7 (UX, bajo riesgo): la marca `in` ya se ve desde el primer clic, como tick discontinuo sobre el groove y como `{` suelta en la tira, en color atenuado y sin `}`.
+- [x] T8 (UX): el clic derecho sobre un tramo nombra el tramo que va a quitar, con sus extremos. Conserva la redacción genérica cuando el clic no cae sobre ninguno y la limpieza de todas.
+- [x] T9 (función, independiente del feature): doble clic sobre la imagen del video reproduce o pausa.
+
 ## Criterios de aceptación
 - Con dos rangos disjuntos marcados, la transcripción cubre ambos y los timestamps resultantes son absolutos respecto al medio original.
 - El SRT generado con marcas es válido sobre el medio original, no sobre el recorte.
@@ -57,7 +66,10 @@ Los archivos que se transcriben son a menudo largos y el usuario solo necesita u
 - Delivery: `exception-ok` con `size:exception` **aprobada por el mantenedor** (2026-09-26). Motivo: al cruzar T1 las 400 líneas authored y no existir todavía repositorio GitHub, los PRs encadenados no eran ejecutables. Se acepta superar el presupuesto y se sigue en commits de unidad de trabajo; cuando exista el repositorio se decidirá si el historial se divide.
 - Riesgo nativo del slice T1: `gentle-ai review assess` con `--base-ref 42dc326 --committed-only` da `medium` por `executable_change` en `app/services/clipper.py`, 5 rutas y 497 líneas, con `review_due: true` y motivo `slice_budget_reached`. La revisión nativa no se ejecuta todavía: el mantenedor la pospuso para después de la fase de pruebas, y el host no puede lanzar subagentes de revisión (política de tier del proveedor). El límite revisado sigue en `42dc326` para que la feature completa se revise como un único slice.
 - T3 commiteada: `4ced31d` (`feat(ui): wire in/out marks into audio and video players`, 4 archivos, +709/−16) y `ba449d2` (`fix(ui): derive the mark groove from the stylesheet, raise light mark contrast`, 2 archivos, +96/−85). HEAD de la rama: `ba449d2`.
-- Riesgo nativo del slice completo (T1+T2+T3): `medium` por `executable_change` en `app/core/models.py`, **11 rutas y 1427 líneas**, `review_due: true` por `slice_budget_reached`. El mantenedor **rechazó la revisión de este candidato** el 2026-09-27 (`--consent declined` → `consent: declined_this_candidate`, sin autoridad ni recibo creado). El rechazo es por candidato, no un apagado global: el límite revisado sigue en `42dc326` y un candidato futuro volverá a preguntar.
+- Riesgo nativo del slice T1+T2+T3: `medium` por `executable_change` en `app/core/models.py`, 11 rutas y 1427 líneas, `review_due: true` por `slice_budget_reached`. El mantenedor **rechazó la revisión de ese candidato** el 2026-09-27 (`--consent declined` → `consent: declined_this_candidate`, sin autoridad ni recibo creado). El rechazo es por candidato, no un apagado global: el límite revisado sigue en `42dc326` y un candidato futuro volverá a preguntar.
+- T5–T9 commiteadas: `7207a16` (T5+T6), `2602993` (T7+T8), `ce0d49c` (T9). 406 líneas authored. HEAD de la rama: `ce0d49c`.
+- Las cinco regresiones de la prueba manual del 2026-09-27 están cerradas y verificadas; el slice sigue sin revisar, con el límite revisado en `42dc326` (1761 líneas authored acumuladas desde la base de la rama, 11 rutas).
+- T4 sigue abierta: falta la sección de `README.md` en inglés, y falta una **segunda** prueba manual (la primera ya se hizo y es la que produjo T5–T9).
 
 ## Evidencia
 
@@ -178,4 +190,34 @@ La función de módulo recibe lo que el llamante juntó (posiciones del slider, 
 | `git diff --check` | limpio |
 | Worktree principal | `git write-tree` sigue en `2ab1817de2f9a190b0df80bfe46c3988ef5727bc`, sin tocar |
 
-**9. Lo que falta y no está resuelto**: T4 sigue abierto por la sección de `README.md` en inglés. La prueba con el medio real de 292 MB (`C:\Users\josea\Videos\2026-09-25 16-19-06.mkv`) por la UI —marcar dos tramos disjuntos, arrancar, confirmar que el sombreado y la tira coinciden con lo que se procesa— sigue siendo manual y no está hecha.
+**9. Lo que falta y no está resuelto**: T4 sigue abierto por la sección de `README.md` en inglés. La prueba manual con el medio real de 292 MB (`C:\Users\josea\Videos\2026-09-25 16-19-06.mkv`) **se hizo** el 2026-09-27 y fue la que produjo T5–T9; lo que sigue pendiente es una **segunda** pasada manual, no la primera.
+
+### T5–T9 — regresiones de la prueba manual (cerrada)
+
+**Commits**: `7207a16` (T5+T6, `main_window.py`), `2602993` (T7+T8, `seek_slider.py`), `ce0d49c` (T9, `video_player_window.py`). 406 líneas authored (+150/−31, +204/−29, +52/−1). Sin dependencias nuevas, sin tocar los servicios de T1 ni el repositorio de T2.
+
+**Entorno de verificación**: el intérprete que el proyecto fija (Python 3.14.3, PySide6 6.11.2) tomado del venv del proyecto, con `QT_QPA_PLATFORM=offscreen` y el worktree en `sys.path`. El humo usa el `MediaRepository` **real** contra un `items.json` temporal, el `QMediaPlayer` **real** contra medios reales, un worker de inferencia síncrono falso (no se carga ningún modelo) y un `QMenu` con `exec()` neutralizado pero dirigible, de modo que una **elección** del menú se ejerce de extremo a extremo. Cada expectativa de geometría se recalcula desde las constantes del stylesheet en vez de devolverle el widget al test, que es lo que permite que una discrepancia real falle.
+
+| Check | Resultado |
+| --- | --- |
+| `python -m compileall app` (3.14.3) | PASS |
+| `git diff --check` | limpio |
+| Humo offscreen T5–T9, intérprete fijado | **PASS: 135 checks, 0 fallos** |
+| Cobertura | T5, T5a–d, T6, T6a–d, T7, T7b–c, T8, T8b–f, T9 |
+| Worktree principal | `git write-tree` sigue en `2ab1817de2f9a190b0df80bfe46c3988ef5727bc`, sin tocar |
+
+**1. T6: la hipótesis se verificó ANTES de arreglar, y era correcta.** Medido en 6.11.2 con el backend ffmpeg, tanto con un wav de 30 s como con el MKV de 292 s: poner una fuente que **ya es** la fuente del reproductor no emite `LoadingMedia`, ni `sourceChanged`, ni `durationChanged`, ni `LoadedMedia`; solo `BufferingMedia`/`BufferedMedia` y la transición a `PlayingState`. El backend conserva el medio cargado, así que `player.duration()` sigue respondiendo bien en la línea siguiente, pero nada lo anuncia. La otra mitad, **por qué preguntar es seguro**: con una fuente genuinamente nueva `player.duration()` responde `0` en la línea siguiente, nunca el valor del medio anterior, y `durationChanged` llega con el real poco después. Medido también que forzar un cambio real de fuente (`setSource(QUrl())` antes de la URL) sí devuelve `durationChanged`, pero vuelve a sondear el fichero en cada entrada y tira la línea temporal por un evento, así que la app **pregunta** en vez de obligar.
+
+**2. T5: la divergencia se declara, nunca se disimula.** Con el medio A cargado y marcado y la fila B seleccionada, la ejecución queda sin acotar y el estado nombra los dos ficheros; cuando la selección coincide con el cargado, las marcas sí acotan. Con nada cargado no hay divergencia posible y se aplica lo propio de la fila. Un medio sin marcas, divergido, también se explica: el mensaje es el mismo, sin marcar en falso lo que no acotó.
+
+**3. T7: el tick pendiente se ve y no se confunde con un tramo.** Contraste real medido contra el groove: **4.89** en oscuro y **4.41** en claro, y **29** escalones de diferencia frente a un tramo ya confirmado, así que la señal no es solo "algo pintado" sino "otra cosa". El tick comparte el mapeo `_x_at_seconds` con los tramos, así que la banda empieza en la columna exacta del tick (medido: mismo valor) y confirmar el fin solo lo engorda.
+
+**4. T8: el índice se resuelve contra lo pintado, con una guarda que importa.** `mark_pixel_rects()` **descarta** el tramo que no se puede dibujar, así que emparejar supervivientes por índice nombraría —y quitaría— el tramo equivocado. Por eso el rect pintado solo se usa cuando rects y marcas almacenadas son del mismo tamaño, y el rango se busca en las marcas almacenadas, nunca en las pintadas. Descubrimiento que costó un check rojo: **`set_marks()` normaliza** (ordena y fusiona), así que `[[100,200],[5,10]]` se almacena como `[[5,10],[100,200]]` y el tramo dibujado es el índice 0. Una expectativa de índice escrita sobre el orden de entrada mide el test, no el widget.
+
+**5. T8, el ensanchado a `MIN_MARK_WIDTH_PX` depende del ancho.** Un tramo de 0.05 s **no** da la premisa del test: medido, con los 1678 px reales de la barra principal las tres columnas ampliadas caen todavía **dentro** del par, así que el mapeo por segundos lo habría encontrado igual. Un tramo subpíxel (`[5.0, 5.001]`, que cae en la misma columna que `5.0` a cualquier ancho) sí sale del par por construcción, y ahí el camino del rect es el único que puede resolverlo: verificado que el clic lo quita y que `_remove_under_cursor` con esos segundos se niega.
+
+**6. T9: `QTest.mouseDClick` no puede modelar un doble clic real sobre un botón checkable.** Envía press + DblClick + release **sin release en medio**, y un `QAbstractButton` solo emite en un release, así que reporta 0 toggles donde un usuario produce 1. Medido con la secuencia real (press, release, DblClick, release) sobre un `QPushButton` checkable: **dos** toggles, `[True, False]`, dejando el botón donde estaba. Es semántica de Qt y es **preexistente**: el forwarder se instala solo en el `QVideoWidget` y el botón conserva exactamente ese comportamiento, lo que el humo comprueba contando los toggles. Sobre la imagen de vídeo, un doble clic real alterna **exactamente una vez**, un segundo pausa por el camino compartido, y el doble clic derecho y el clic simple no alternan.
+
+**7. Los 4 checks que fallaron en la primera pasada no eran defectos del producto.** Se-investigó cada uno con sondas independientes antes de tocar nada, y los cuatro medían el script: uno esperaba un índice previo a la normalización, dos dependían del ancho, y uno usaba una señal de `QTest` que no reproduce un doble clic real. Corregido el script para que mida el invariante en vez de la premisa caducada, el humo pasa entero. **No se cambió código de producción para hacer pasar un test.**
+
+**8. Riesgo nativo del slice**: `gentle-ai review assess` con `--base-ref 42dc326 --committed-only` devuelve `unassessable` porque el worktree tiene `.codegraph/` sin trackear, que exige una declaración explícita de untracked; el índice local de CodeGraph no es parte de la feature. `review_due: true` por `high_risk`. El límite revisado sigue en `42dc326`.
