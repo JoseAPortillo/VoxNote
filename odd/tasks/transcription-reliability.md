@@ -92,6 +92,40 @@ which is a second reason that model was out).
   Chunked re-prompting takes M1 from 0.000 to 0.381 on the reference file.
 - [ ] F6: build the chunked path (fresh prompt per chunk + warmup seams + grouping) and
   measure it against this baseline before touching production.
+
+## F6 verdict: the chunked path fixes punctuation and breaks coverage
+Built and measured. The harness gained `--chunks` and `--warmup`; it decodes contiguous
+ranges, pads each by the warmup margin, keeps words by midpoint so no word is duplicated
+across an overlap, and groups the survivors into sentences. The margin pattern mirrors
+`Transcriber.transcribe_segments`; the midpoint filter replaces that clamping because the
+ranges here are contiguous rather than disjoint.
+
+Reference file, 468.95 s, `large-v3-turbo`, `condition_on_previous_text=False` where noted:
+
+| Configuration | M1 complete | M2 coverage | speech in gaps | chars |
+|---------------|-------------|-------------|-----------------|-------|
+| **current app options** | 0.000 | **0.979** | **5.69 s** | 3684 |
+| chunk 60 s + prompt + cond OFF | 0.557 | 0.745 | 71.21 s | 3498 |
+| chunk 60 s + prompt + cond ON | **0.919** | 0.693 | 74.71 s | 3439 |
+
+Punctuation is genuinely solved and the gain is large, so the mechanism above is real.
+The strategy is still rejected, because **M2 is non-negotiable**: 71 s to 75 s of speech
+lands in gaps, roughly 12 % of the material. Buying punctuation with dropped content is
+the wrong trade for a transcription tool, and no amount of M1 improvement makes up for
+words the user never sees.
+
+Holding `condition_on_previous_text=True` does not rescue coverage (0.693, marginally
+worse), so the loss is not the conditioning flag. The clue is the shape of the loss:
+30 gapped regions across 8 chunks is three to four per chunk, and a 90 s padded chunk is
+three whisper windows of 30 s. The gaps land on **whisper's internal 30 s window seams**,
+not on the seven chunk boundaries this harness controls, which is why padding the chunk
+boundaries does not close them.
+
+Next hypothesis, not yet tested: place chunk boundaries in the **detected long silences**
+instead of on a fixed 60 s grid, so no boundary ever cuts speech. The detector and the
+123 regions already exist in `tests/asr/metrics.py`. That addresses the seams this
+harness controls; it does not by itself address whisper's internal seams, so it is a
+necessary test and not a predicted fix.
 - [x] F4: `large-v3` compared against turbo. **Turbo wins on coverage and speed.**
 - [ ] F5: decision recorded; interface abstracted only if warranted.
 

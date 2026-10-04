@@ -41,7 +41,12 @@ from app.core.config import (  # noqa: E402
     WHISPER_DEVICE,
     WHISPER_MODEL,
 )
-from app.services.clipper import SAMPLE_RATE, decode_range, duration  # noqa: E402
+from app.services.clipper import (  # noqa: E402
+    RANGE_WARMUP,
+    SAMPLE_RATE,
+    decode_range,
+    duration,
+)
 from app.services.sentences import (  # noqa: E402
     SENTENCE_MAX_CHARS,
     SENTENCE_MAX_GAP,
@@ -133,6 +138,90 @@ def as_sentences(
     return windows, sentences, elapsed
 
 
+def chunk_ranges(total: float, chunk: float) -> list[tuple[float, float]]:
+    """Split ``[0, total]`` into contiguous ``chunk``-second ranges.
+
+    Contiguous rather than speech-region ranges, which is the whole point: the
+    punctuation fix needs a *fresh* decoder prior at a regular cadence, and speech
+    regions would give an irregular one.
+    """
+    if chunk <= 0:
+        raise SystemExit(f"--chunks expects a positive number, got {chunk!r}")
+    ranges: list[tuple[float, float]] = []
+    start = 0.0
+    while start < total:
+        end = min(start + chunk, total)
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def as_chunked_sentences(
+    model, media: str, total: float, options: dict, chunk: float, warmup: float,
+    gap: float, chars: int,
+) -> tuple[list[Segment], dict]:
+    """Decode chunk by chunk, re-prompting each time, then group into sentences.
+
+    faster-whisper applies ``initial_prompt`` once per ``transcribe()`` call, and
+    ``condition_on_previous_text=True`` makes each internal window inherit the
+    previous window's output. Over a long file that reinforcement collapses
+    punctuation to nothing. Re-prompting per chunk resets the prior, which is the
+    only lever found to sustain punctuation across a whole file.
+
+    Each chunk is decoded with a warmup margin and then filtered by word midpoint,
+    so a word belongs to exactly one chunk and cannot be duplicated where two
+    overlapping decodes both saw it. The margin pattern mirrors
+    ``Transcriber.transcribe_segments``; the midpoint filter replaces that
+    clamping because these ranges are contiguous, not disjoint.
+    """
+    from app.services.clipper import decode_range
+
+    started = time.perf_counter()
+    words: list[Word] = []
+    seen = 0
+    per_chunk: list[dict] = []
+
+    for low, high in chunk_ranges(total, chunk):
+        pad_low = max(0.0, low - warmup)
+        pad_high = min(total, high + warmup)
+        audio = decode_range(media, pad_low, pad_high)
+        if audio.size == 0:
+            per_chunk.append({"low": low, "high": high, "words": 0, "dropped": 0})
+            continue
+        # Materialise: faster-whisper yields lazily, and this generator is drained
+        # once here on purpose.
+        raw = list(model.transcribe(audio, **dict(options, word_timestamps=True))[0])
+        kept = dropped = 0
+        for s in raw:
+            for w in list(getattr(s, "words", None) or []):
+                seen += 1
+                start_abs = float(w.start) + pad_low
+                end_abs = float(w.end) + pad_low
+                if (start_abs + end_abs) / 2.0 < low or (start_abs + end_abs) / 2.0 >= high:
+                    dropped += 1
+                    continue
+                words.append(Word(start=start_abs, end=end_abs, text=w.word or ""))
+                kept += 1
+        per_chunk.append({"low": low, "high": high, "words": kept, "dropped": dropped})
+
+    words.sort(key=lambda w: w.start)
+    sentences = [
+        Segment(start=s.start, end=s.end, text=s.text)
+        for s in group_into_sentences(words, max_chars=chars, max_gap=gap)
+    ]
+    stats = {
+        "chunk_s": chunk,
+        "warmup_s": warmup,
+        "chunks": len(per_chunk),
+        "words_seen": seen,
+        "words_kept": len(words),
+        "words_dropped_in_overlap": seen - len(words),
+        "wall_s": round(time.perf_counter() - started, 2),
+        "per_chunk": per_chunk,
+    }
+    return sentences, stats
+
+
 def peak_vram_mb() -> float:
     """Peak CUDA allocation for this process, or 0.0 when running on CPU."""
     try:
@@ -180,6 +269,18 @@ def main(argv: list[str] | None = None) -> int:
         default=SENTENCE_MAX_CHARS,
         help=f"length valve for a sentence (default {SENTENCE_MAX_CHARS})",
     )
+    parser.add_argument(
+        "--chunks",
+        type=float,
+        metavar="SECONDS",
+        help="decode in contiguous chunks, re-applying --set per chunk (F6 candidate)",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=RANGE_WARMUP,
+        help=f"margin decoded on each side of a chunk and filtered back (default {RANGE_WARMUP})",
+    )
     parser.add_argument("--json", metavar="PATH", help="write the report as JSON")
     args = parser.parse_args(argv)
 
@@ -207,7 +308,27 @@ def main(argv: list[str] | None = None) -> int:
         args.model, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
     )
 
-    if args.sentences:
+    if args.chunks:
+        # Chunks re-prompt, so they must always be grouped: the point of the run is
+        # to see where the chunk seams land, and word timestamps are what make a
+        # seam visible. Forcing them here keeps that from being an easy mistake.
+        sentences, chunk_stats = as_chunked_sentences(
+            model, str(media), total, options, args.chunks, args.warmup,
+            args.gap, args.chars,
+        )
+        report = analyse(sentences, waveform, total, SAMPLE_RATE)
+        report.families["M5_cost"] = cost(
+            chunk_stats["wall_s"], total, peak_vram_mb()
+        )
+        report.families["chunking"] = chunk_stats
+        report.families["context"] = {
+            "label": label,
+            "model": args.model,
+            "media": media.name,
+            "options": {k: str(v) for k, v in options.items()},
+            "units": "sentences from chunked re-prompted decode",
+        }
+    elif args.sentences:
         # One transcription, scored twice: the window units whisper produced and the
         # sentence units built from the same words. Comparing across runs would
         # confound the grouping with decoder nondeterminism.
