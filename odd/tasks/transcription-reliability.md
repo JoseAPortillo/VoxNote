@@ -83,15 +83,26 @@ signature rather than documentation:
 `beam_size` stays at 5: beam search helps Whisper (it is counterproductive on Parakeet,
 which is a second reason that model was out).
 
+## A note on two character counts
+`chars_total` from the harness and a raw `" ".join(segment.text)` differ by roughly the
+number of separators and stripped whitespace, so the same baseline reads **3595** in the
+harness and **3684** in a probe. Every table below uses the harness figure, measured twice
+for the baseline (45 units, M1 0.000, M2 0.979, 4 gaps, 5.690 s of speech in gaps,
+speech_frac 0.517, 59.4x). The **3543** that appears in the F3 notes is the separate
+`word_timestamps=True` variant, which emits slightly less text; it is not the baseline and
+is not quoted as one.
+
 ## Checklist
 - [x] F0: harness versioned in the repo, committed. 41/41 unit tests green.
 - [x] F1: baseline of M1-M5 on the reference MKV. See evidence.
 - [x] F2: decode options measured. **Negative result — keep the current options.**
-- [x] F3: sentence grouper built and measured. **Superseded: M1 IS reachable.** The
-  cause is `condition_on_previous_text=True` decaying the punctuation, not the audio.
-  Chunked re-prompting takes M1 from 0.000 to 0.381 on the reference file.
-- [ ] F6: build the chunked path (fresh prompt per chunk + warmup seams + grouping) and
-  measure it against this baseline before touching production.
+- [x] F3: sentence grouper built and measured, then **the phase's own conclusion was
+  overturned twice.** M1 IS reachable: the cause is `condition_on_previous_text=True`
+  decaying the prompt, not the audio and not the speaker.
+- [x] F4: `large-v3` compared against turbo. **Turbo wins on coverage and speed.**
+- [x] F5: decision recorded from data. **No model interface abstraction warranted** —
+  turbo stays and the option set stays, so there is nothing left to abstract.
+- [x] F6: chunked re-prompted decode built and measured. **Rejected on coverage.**
 
 ## F6 verdict: the chunked path fixes punctuation and breaks coverage
 Built and measured. The harness gained `--chunks` and `--warmup`; it decodes contiguous
@@ -104,7 +115,7 @@ Reference file, 468.95 s, `large-v3-turbo`, `condition_on_previous_text=False` w
 
 | Configuration | M1 complete | M2 coverage | speech in gaps | chars |
 |---------------|-------------|-------------|-----------------|-------|
-| **current app options** | 0.000 | **0.979** | **5.69 s** | 3684 |
+| **current app options** | 0.000 | **0.979** | **5.69 s** | 3595 |
 | chunk 60 s + prompt + cond OFF | 0.557 | 0.745 | 71.21 s | 3498 |
 | chunk 60 s + prompt + cond ON | **0.919** | 0.693 | 74.71 s | 3439 |
 
@@ -121,39 +132,37 @@ three whisper windows of 30 s. The gaps land on **whisper's internal 30 s window
 not on the seven chunk boundaries this harness controls, which is why padding the chunk
 boundaries does not close them.
 
-Next hypothesis, not yet tested: place chunk boundaries in the **detected long silences**
-instead of on a fixed 60 s grid, so no boundary ever cuts speech. The detector and the
-123 regions already exist in `tests/asr/metrics.py`. That addresses the seams this
-harness controls; it does not by itself address whisper's internal seams, so it is a
-necessary test and not a predicted fix.
-- [x] F4: `large-v3` compared against turbo. **Turbo wins on coverage and speed.**
-- [ ] F5: decision recorded; interface abstracted only if warranted.
+Untested and left untested at the maintainer's decision to close: placing chunk boundaries
+in the **detected long silences** rather than on a fixed 60 s grid. The detector and the
+123 regions already exist in `tests/asr/metrics.py`. That would address the seams the
+harness controls; it does not by itself address whisper's internal seams, so it was a
+necessary test and never a predicted fix.
 
-## The finding that reframes everything (F3)
+## The finding that reframed everything (F3, first reading)
 Reading the actual output, which three phases of aggregates had failed to do:
 **the reference transcript contains 0 periods, 0 commas, 0 question marks and 0
-exclamation marks across 3543 characters.** It is run-on text. Whisper never places a
+exclamation marks across 3595 characters of baseline output.** It is run-on text. Whisper never places a
 sentence boundary in it.
 
 So the F1 conclusion was **wrong**. The chop is not 30 s window boundaries cutting
 sentences; there are no sentences in the output to cut. Every framing that followed from
 "the window lands mid-thought" was reasoning about a cause that does not exist.
 
-Confirmed across engines and levers, on the reference MKV:
+> **Superseded.** The table below is kept as the record of the wrong turn, because
+> "the prompt does not restore it" is the exact claim the next section refutes. Do not
+> read it as current.
 
 | Lever | M1 complete | notes |
 |-------|-------------|-------|
 | turbo, current options | 0.000 | 45 units |
 | turbo, `word_timestamps` | 0.000 | 44 units |
 | turbo, `condition_on_previous_text=False` | 0.111 | 45 units, from the F2 sweep |
-| turbo, `initial_prompt` asking for punctuation | 0.000 / 0.056 | prompt does not restore it |
-| turbo, sentence grouping at 1.2 s pauses | **0.000** | 39 units, chars preserved |
-| **large-v3** (full model) | **0.000** | 55 units, 3813 chars |
+| turbo, `initial_prompt` asking for punctuation | 0.000 / 0.056 | ~~prompt does not restore it~~ **wrong — see below** |
+| turbo, sentence grouping at 1.2 s pauses | 0.000 | 39 units, chars preserved |
+| **large-v3** (full model) | 0.000 | 55 units, 3813 chars |
 
-The full model punctuates nothing either. **M1 as defined is unachievable on this audio
-with whisper**, and no decode option, prompt, grouping or model change reaches it.
-Reporting it as fixable without this evidence would have spent the whole exercise on a
-target that does not exist.
+The inference drawn here — that M1 is unachievable on this audio with whisper — was
+**false**. The measurement was right; the cause attributed to it was wrong.
 
 ## The real cause: the prompt decays within one transcribe() call (F3, corrected)
 The first reading of this phase was wrong twice, and both corrections came from checking
@@ -188,7 +197,7 @@ single prompted call. It works because it removes the reinforcement loop: a fres
 `initial_prompt` per chunk resets the prior each time.
 
 **The trade, stated plainly.** Chunking restores punctuation but introduces seams: 3442
-characters against the 3684 single-call baseline, and a chunk boundary lands mid-sentence
+characters against the 3595 single-call baseline, and a chunk boundary lands mid-sentence
 ("...really arguing standing kind" | "This close and front facing"). So it relocates the
 defect rather than eliminating it, and closing the seams needs the warmup overlap
 `clipper.RANGE_WARMUP` already implements and already measured, plus the sentence
@@ -196,7 +205,7 @@ grouper to absorb the joins. That is a real design, not a guess, and it is not b
 
 ### What the grouper is actually worth
 `app/services/sentences.py` works: 738 timed words → 39 units, 3548 chars against a
-3543-char window baseline, every unit closed at a pause rather than at a window edge,
+3595-char window baseline, every unit closed at a pause rather than at a window edge,
 none overlapping, median 73 chars against 96. Text is preserved exactly. Breaks become
 meaningful instead of arbitrary. That is readability, not phrase completeness, and it
 becomes load-bearing rather than optional once chunk seams exist.
@@ -233,11 +242,20 @@ agnostic: `large-v3` prompted on the excerpt gave 7 periods and 6 commas in 651 
 - **The benchmark's own detector was wrong and was corrected.** The first F2 sweep looked
   like a catastrophic result until a per-segment probe showed it was arithmetic nonsense.
   See the recalibration note below; this was the most important fix in the whole exercise.
-- **F3 built the sentence grouper and disproved the phase's own premise.** Reading the
-  transcript for the first time showed zero punctuation in 3543 characters, so there are
-  no sentences to find. The grouper is sound and is kept, but it improves readability, not
-  phrase completeness, and it is not wired into production.
+- **F3 built the sentence grouper and overturned the phase twice.** Reading the transcript
+  for the first time showed zero punctuation in 3543 characters, and the first conclusion
+  drawn from that — "no sentences to find, M1 unreachable" — was itself wrong. Punctuation
+  turned out to be recoverable, and the grouper improves readability on its own terms. Kept
+  but deliberately **not wired into production**; see the closure note.
 - **F4 compared engines and turbo won.** large-v3 is worse on coverage and 10x slower.
+- **F5 closed on measured grounds.** No model change, no option change, no interface
+  abstraction, run-on output accepted consciously. See the closure section.
+- **F6 built and rejected.** Chunked re-prompting solves punctuation (M1 0.000 to 0.919)
+  and destroys coverage (0.979 to 0.693, 74.71 s of speech in gaps). Rejected.
+- **Housekeeping on close.** `coverage()` accepted a `mask` parameter for several
+  versions and never read it; removed rather than left implying it did something. The
+  suspected double-counting of overlapping segments was checked and unfounded —
+  `cursor = max(cursor, segment.end)` already prevents it.
 - Not delegating: subagent dispatch has failed three times in this client
   ("OpenCode's free tier can only be used from within OpenCode"), so these files were
   written inline rather than spending a fourth attempt on it.
@@ -268,7 +286,9 @@ The unused `sample_rate` arguments on `speech_regions` and `silence_and_repetiti
 were removed rather than left lying about the frame length.
 
 ### F1 baseline, reference MKV, `large-v3-turbo`, app options `{beam_size:5, vad_filter:True}`
-Signal: 468.95 s, noise floor **-69.3 dBFS**, 123 speech regions, speech_frac 0.691.
+Signal: 468.95 s, noise floor **-69.3 dBFS**, 123 speech regions, speech_frac 0.517
+(the 0.691 in an earlier draft of this line came from the unrecalibrated 6 dB detector;
+see the recalibration note).
 
 | Family | Result | Reading |
 |--------|--------|---------|
@@ -278,9 +298,11 @@ Signal: 468.95 s, noise floor **-69.3 dBFS**, 123 speech regions, speech_frac 0.
 | M4 | -219 chars (-6.1 %) | not frequency-masked |
 | M5 | **58x real-time** | plenty of headroom |
 
-**M1 is the defect.** 41 of 45 segments straddle a pause, which is the mechanical cause:
-whisper emits fixed 30 s windows, so every window boundary lands mid-thought. No model
-change touches this. F3 is the fix.
+**M1 is the one real defect**, but not for the reason recorded at the time. The cause is
+not that whisper emits fixed 30 s windows that land mid-thought: the units already match
+the speaker's pauses (mean 10.4 s against 43 pauses of 1.2 s or more). The cause is that
+whisper emits **no sentence boundaries at all**, so no unit can end a sentence. See the
+correction below.
 
 **M3 refuted our hypothesis.** We expected text invented over the music bed. It is not
 there: **zero** segments sit entirely on silence, and the 4-gram repeat ratio is 0.036,
@@ -315,10 +337,57 @@ A test that cannot fail is worse than no test: had the detector not been checked
 have "proven" that turning on word timestamps destroys the transcription. The only reason
 that did not happen is that the sweep looked implausible and got investigated.
 
-## Next step
-The evidence now points at one concrete implementation rather than a product choice:
-decode in chunks with a fresh `initial_prompt` per chunk, overlap them by
-`clipper.RANGE_WARMUP` to close the seams, and group the words into sentences to absorb
-the joins. Every part of that already exists in this repository; none of it is wired
-together, and the two known costs are seam artifacts and shorter translation units.
-Measure that path against the current baseline before changing production.
+## Closure: the plan is closed on measured grounds
+Closed at the maintainer's decision. **Production is unchanged and no code in `app/` runs
+differently as a result of this plan.**
+
+### The decision
+Keep `large-v3-turbo` with `{beam_size: 5, vad_filter: True}` and accept run-on output as
+a conscious trade, because every route to punctuation costs coverage.
+
+- **Coverage wins.** 0.979 speech coverage with 5.69 s of real speech in gaps is the
+  strongest result this exercise produced. Both decode-option changes and the chunked path
+  traded it away, and it was treated as non-negotiable throughout.
+- **No model change.** `large-v3` is worse on coverage (0.899, 28.36 s in gaps) and 10x
+  slower, so "bigger model fixes it" is measured false.
+- **No model interface abstraction.** F5 was chartered to abstract one only if data
+  warranted it. The data chose a single engine and a single option set, so there is nothing
+  left to abstract. Building the abstraction would be speculative surface area.
+- **Run-on text accepted.** Whisper emits no sentence boundaries for this speaker and
+  cannot be made to without dropping speech. The output is transcribed and complete; it is
+  punctuated like a transcript, not like prose.
+
+### What is in the repository, and why
+- `tools/bench_asr.py`, `tests/asr/metrics.py`, `tests/asr/test_metrics.py` — the
+  measurement harness. This is the plan's real deliverable and the reason it was worth
+  running. Keep it; it is how any future attempt gets judged.
+- `app/services/sentences.py` + `tests/asr/test_sentences.py` — **deliberately unwired.**
+  21 tests, text-preserving, closes units at real pauses. It improves readability but does
+  not add punctuation, and wiring it would shorten the units that `Pipeline` translates
+  independently, with no measurement in this repo of what that does to translation quality.
+  It is kept because it is tested measured work and is the component any future fix would
+  build on. **Delete it** if it is not adopted, rather than leaving unused code in the app
+  package — git history preserves it either way.
+- Nothing else. No production file was modified by this plan.
+
+### What would reopen this, and what would not
+Reopen only on a measurement that beats **0.979 coverage AND 0.000 M1 together**. Neither
+of these is worth another cycle:
+- Chunk boundaries placed in detected silences. Necessary to test, never predicted to work,
+  because the loss sits on whisper's internal 30 s seams rather than on boundaries the app
+  controls.
+- `initial_prompt` tuning. The mechanism is understood; the ceiling without chunking is
+  1 period across the file.
+
+The lever that has never been tested is **decoding without whisper's internal 30 s windowing**
+— a fixed-window-free segmentation, or an engine that punctuates natively. That is a
+different architecture, not another option sweep.
+
+### Honest accounting of how this went
+Three of this plan's own conclusions were wrong and each was caught by checking the
+underlying signal instead of the aggregate: the speech detector (744 regions averaging
+0.435 s was arithmetic nonsense), the "M1 is unreachable" inference, and the "the prompt
+does not restore punctuation" claim. In all three cases the first measurement was correct
+and the **cause attributed to it** was not. That is the transferable lesson: an
+implausible number is worth more than a plausible story, and a metric that cannot fail is
+worse than no metric.

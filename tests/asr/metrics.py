@@ -237,7 +237,6 @@ def phrase_integrity(segments: list[Segment]) -> dict:
 def coverage(
     segments: list[Segment],
     total_duration: float,
-    mask: np.ndarray,
     regions: list[tuple[float, float]],
 ) -> dict:
     """Where speech exists and no text was emitted.
@@ -247,6 +246,12 @@ def coverage(
     a hole in the middle is invisible in a start-to-end figure. This counts gaps of
     at least ``MIN_GAP_SECONDS`` that overlap speech, which is the shape of a real
     omission.
+
+    Takes the speech *regions*, not the raw frame mask. The mask was a parameter
+    here for several versions and never read: it described frame granularity,
+    while every overlap below is measured against merged regions. A parameter that
+    is accepted and ignored is worse than no parameter, because the call site
+    implies it is doing something.
     """
     ordered = sorted(
         (s for s in segments if s.text.strip()), key=lambda s: s.start
@@ -438,7 +443,7 @@ def analyse(
                 ),
             },
             "M1_phrase_integrity": phrase_integrity(segments),
-            "M2_coverage": coverage(segments, total_duration, mask, regions),
+            "M2_coverage": coverage(segments, total_duration, regions),
             "M3_silence_and_repetition": silence_and_repetition(segments, regions),
         }
     )

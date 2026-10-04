@@ -95,7 +95,7 @@ class TestCoverage(unittest.TestCase):
     def test_gap_between_segments_counts_when_speech_is_there(self):
         # Text present 2-4 and 6-8. The 4-6 gap is silent, so it must NOT count.
         segments = [Segment(2.0, 4.0, "hello."), Segment(6.0, 8.0, "again.")]
-        result = coverage(segments, 10.0, self.mask, self.regions)
+        result = coverage(segments, 10.0, self.regions)
         self.assertEqual(result["gaps_with_signal"], 0)
         self.assertAlmostEqual(result["tail_lost_s"], 2.0, delta=0.1)
 
@@ -104,7 +104,7 @@ class TestCoverage(unittest.TestCase):
         # The tail gap is 6 s wide but only 2 s of it carries signal, and only
         # that 2 s may be charged: the metric counts lost speech, not lost time.
         segments = [Segment(2.0, 4.0, "hello.")]
-        result = coverage(segments, 10.0, self.mask, self.regions)
+        result = coverage(segments, 10.0, self.regions)
         self.assertEqual(result["gaps_with_signal"], 1)
         self.assertGreater(result["speech_in_gaps_s"], 1.5)
         self.assertLess(result["speech_in_gaps_s"], 2.5)
@@ -113,7 +113,7 @@ class TestCoverage(unittest.TestCase):
         # Text starts at 3 s, so the 2-3 speech span is lost. A start-to-end span
         # figure cannot see this; gaps_with_signal has to.
         segments = [Segment(3.0, 7.0, "middle only.")]
-        result = coverage(segments, 10.0, self.mask, self.regions)
+        result = coverage(segments, 10.0, self.regions)
         self.assertEqual(result["gaps_with_signal"], 2)
         self.assertAlmostEqual(result["first_start_s"], 3.0)
 
@@ -122,7 +122,7 @@ class TestCoverage(unittest.TestCase):
         # anything for it, so it reaches across the whole file yet says half of
         # what was said. This is the shape plain coverage cannot distinguish.
         segments = [Segment(3.0, 7.0, "middle only.")]
-        result = coverage(segments, 10.0, self.mask, self.regions)
+        result = coverage(segments, 10.0, self.regions)
         self.assertAlmostEqual(result["speech_covered_frac"], 0.5, delta=0.05)
         self.assertGreater(result["span_frac"], 0.35)
 
