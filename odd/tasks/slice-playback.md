@@ -70,14 +70,16 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 - Sin slice, el resultado es idéntico al comportamiento actual.
 
 ## Verificación
-- `.venv\Scripts\python.exe -m pytest -q` (pytest 9.0.3 confirmado en el venv del proyecto).
+- **Comando autoritativo:** `.venv\Scripts\python.exe -m unittest discover -s tests`. El intérprete del proyecto (`.venv`) tiene **PySide6 6.11.2 pero no pytest**; el intérprete base (`E:\Python314`) tiene **pytest 9.0.3 pero no PySide6**. Los dos son disjuntos, así que pytest por sí solo no puede correr los checks de Qt, y `.venv` es el intérprete que ejecuta la app. `unittest` es stdlib y corre en `.venv`. El estilo de tests del repo ya es `unittest.TestCase`, no fixtures de pytest.
+- `python -m pytest -q` (intérprete base) — misma suite, opcional.
 - Widgets y reproductores con `QT_QPA_PLATFORM=offscreen`.
 - `.venv\Scripts\python.exe -m compileall app`
 - `git diff --check`
 
 ## Progreso
 - Ruta: **delegated direct**. El cambio toca modelo, persistencia, slider, los dos reproductores y el pipeline: 2+ archivos no triviales, así que la implementación va delegada a un escritor acotado. La lectura que prepara la escritura va con el escritor, no aparte.
-- TDD: **resuelto por decisión del orquestador (2026-10-04)**, no por configuración del proyecto — no hay registro `sdd-init/transcript` ni config de test en el repo. Runner: `.venv\Scripts\python.exe -m pytest` (pytest 9.0.3, verificado). Se aplica TDD a la lógica pura (`normalize_slice`, geometría, matemática de posición acotada) y checks offscreen al comportamiento de Qt, que no es unit-testeable. Motivo: el fallo de T8 fue una expectativa escrita sobre el orden de entrada cuando `set_marks` normaliza en la asignación (`seek_slider.py:192`) — clase de defecto que un test de la normalización habría pillado antes.
+- TDD: **resuelto por decisión del orquestador (2026-10-04)**, no por configuración del proyecto — no hay registro `sdd-init/transcript` ni config de test en el repo. Runner autoritativo: `.venv\Scripts\python.exe -m unittest discover -s tests`. Se aplica TDD a la lógica pura (`normalize_slice`, geometría, matemática de posición acotada) y checks offscreen al comportamiento de Qt, que no es unit-testeable. Motivo: el fallo de T8 fue una expectativa escrita sobre el orden de entrada cuando `set_marks` normaliza en la asignación (`seek_slider.py:192`) — clase de defecto que un test de la normalización habría pillado antes.
+- **Corrección de T1 (2026-10-04):** este documento afirmaba que el venv del proyecto tenía pytest 9.0.3. Es falso, y T1 lo refutó ejecutándolo. La versión era correcta; la ubicación no. Ver "Verificación".
 - Precedente del feature anterior: la evidencia vivía en `%TEMP%` y se perdió. Aquí los checks offscreen se quedan en el repo.
 - Delivery: por decidir. Forecast ≈ 1000–1200 líneas authored, **por encima del presupuesto de ~400**. Sin remoto GitHub, los PRs encadenados no son ejecutables; el precedente (`in-out-marks`) fue `exception-ok` con `size:exception` aprobada por el mantenedor.
 - Estimación por tarea: T1 ≈ 180, T2 ≈ 350, T3 ≈ 250, T4 ≈ 120, T5 ≈ 250.

@@ -1,53 +1,61 @@
 """Domain data models."""
 
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 
-def normalize_marks(raw) -> list[list[float]] | None:
-    """Return in/out marks as ordered, non-overlapping ``[start, end]`` pairs.
+def normalize_slice(raw) -> list[float] | None:
+    """Return one ``[start, end]`` pair in seconds, or ``None`` for no slice.
 
-    Marks are absolute seconds on the media timeline, so an exported SRT can
-    subtitle the original file. Callers hand over whatever they collected
-    (slider positions, a stored list, a hand-edited ``items.json``) and this
-    function is the single place that makes it usable: a pair that is not two
-    numbers, or whose ``end`` is not after its ``start``, is dropped; the
-    survivors are sorted by start; and pairs that touch or overlap are merged
-    into one, so two marks on the same spot become one range instead of
-    decoding that audio twice.
+    The slice is absolute seconds on the media timeline, so an exported SRT can
+    still subtitle the original file. Callers hand over whatever they have (two
+    slider positions, a stored pair, a hand-edited ``items.json``) and this
+    function is the single place that makes it usable.
 
-    ``None`` comes back for ``None``, for an empty input, and for input whose
-    every pair was invalid: "no marks" stays a single state. That matters
-    downstream, because the engines read an empty range list as "the whole
-    file", so the absent case must never be stored as ``[]``.
+    ``None`` is the ONLY representation of "no slice", never ``[]``. That is
+    not a style choice: the transcription engines read an empty range list as
+    "the whole file", so an empty list stored as "no slice" would be
+    indistinguishable from no slice when reading the item and would mean the
+    exact opposite when handed to the engine -- the run would transcribe the
+    whole medium with nothing in the UI reporting it. Every unusable input
+    (wrong length, non-numeric, NaN/inf, negative, zero or inverted range)
+    therefore normalizes to ``None``: the same state as never having moved a
+    handle.
+
+    The pair comes back as a list of float, not a tuple. JSON has no tuple, so
+    a tuple written to ``items.json`` returns from ``json.loads`` as a list and
+    ``item.slice == [1.0, 5.0]`` would then be False for the stored value;
+    storing lists keeps one save/load cycle equal by value instead of by
+    accident of type.
     """
-    if not raw:
+    if not isinstance(raw, (list, tuple)):
+        # The container shape is checked before the values, because two
+        # iterables that survive this check silently become plausible-looking
+        # slices: a bare string indexes as characters ("12" -> 1.0, 2.0) and a
+        # dict has length 2 and indexes by key.
         return None
-    pairs: list[list[float]] = []
-    for pair in raw:
-        # A bare string is iterable but indexing it would silently yield digits
-        # ("12" -> 1.0, 2.0), so the pair shape is checked before the values.
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            continue
+    if len(raw) != 2:
+        return None
+    seconds: list[float] = []
+    for value in raw:
+        # A JSON boolean is an int in Python and float(False) is 0.0, so
+        # [false, true] would quietly become a 0-1 s slice nobody ever set.
+        if isinstance(value, bool):
+            return None
         try:
-            start, end = float(pair[0]), float(pair[1])
+            seconds.append(float(value))
         except (TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        pairs.append([start, end])
-    if not pairs:
+            return None
+    start, end = seconds
+    if not (math.isfinite(start) and math.isfinite(end)):
+        # A NaN end survives every ordering comparison below, so without this
+        # it would reach the engines as a range they cannot seek or decode.
         return None
-    pairs.sort()
-    merged: list[list[float]] = [pairs[0]]
-    for start, end in pairs[1:]:
-        last = merged[-1]
-        if start <= last[1]:
-            last[1] = max(last[1], end)  # touching or overlapping
-        else:
-            merged.append([start, end])
-    return merged
+    if start < 0.0 or end <= start:
+        return None
+    return [start, end]
 
 
 @dataclass
@@ -55,9 +63,9 @@ class MediaItem:
     """A media file registered in the working list.
 
     Result fields (``transcript_*`` / ``translation_*``), edited-document
-    fields and the in/out marks are optional and persisted per file. They all
-    default to None so old ``items.json`` entries that only carry
-    ``path``/``alias``/``added_at`` still load via ``MediaItem(**entry)``.
+    fields and the playback/execution slice are optional and persisted per
+    file. They all default to None so old ``items.json`` entries that only
+    carry ``path``/``alias``/``added_at`` still load via ``MediaItem(**entry)``.
     """
 
     path: str
@@ -78,16 +86,20 @@ class MediaItem:
     transcript_edited_text: str | None = None
     translation_edited_text: str | None = None
 
-    # In/out marks scoping the next run, as ``[start, end]`` second pairs on the
-    # media timeline. ``None`` means no marks at all; see :func:`normalize_marks`
-    # for the ordering/merging rules and for why the empty case is also ``None``.
-    marks: list | None = None
+    # The single ``[start, end]`` pair, in seconds on the media timeline, that
+    # bounds playback AND scopes the next transcription/translation. It
+    # persists: no run ever consumes it. ``None`` means the whole file, and is
+    # the only way to say that; see :func:`normalize_slice` for why the empty
+    # case is also ``None`` instead of ``[]``.
+    slice: list | None = None
 
     def __post_init__(self) -> None:
         # Enforced on every construction so the invariant holds for items
         # rebuilt by ``MediaItem(**entry)`` from a stored file too, not only for
-        # the ones written through the repository.
-        self.marks = normalize_marks(self.marks)
+        # the ones written through the repository. That is what makes a
+        # hand-edited ``items.json`` self-repair on load instead of carrying a
+        # slice the engines cannot use.
+        self.slice = normalize_slice(self.slice)
 
     @classmethod
     def from_path(cls, path: str) -> "MediaItem":
