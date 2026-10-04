@@ -56,7 +56,7 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 - [ ] T2: handles en el slider. `HANDLE_HIT_PX` + hit-test; el press sobre un handle **no busca** (colisiona con el `mousePressEvent` actual de `seek_slider.py:154`, que hace seek); recorte a `[0, duración]` y a `MIN_SLICE_SECONDS`; pintado de handles activos y atenuados; se borran menú, tira de llaves, `pending_in`, `mark_pixel_rects`, `pending_pixel_rect`, `_hit_index`. Se reutilizan `_x_at_seconds` (`:216`) y `_position_seconds_at` (`:324`).
 - [x] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; watchdog que para o hace loop en el fin; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
 - [x] T4: la ejecución usa el slice y deja de consumirlo. Se borran `_consume_marks` y `clear_marks`; `_run` toma `item.slice` de la **fila seleccionada**; el texto de divergencia pasa a ser una nota corta de "estás viendo X, se ejecutará Y" (ya no es un fallo de correctitud); el denominador de progreso usa la duración del slice.
-- [ ] T5: verificación y documentación. Pytest de la lógica pura **y** de los widgets offscreen (`QT_QPA_PLATFORM=offscreen`), de modo que la evidencia vive en el repo y no en `%TEMP%`; `compileall`; `git diff --check`; sección de `README.md` en inglés.
+- [x] T5: verificación y documentación. Pytest de la lógica pura **y** de los widgets offscreen (`QT_QPA_PLATFORM=offscreen`), de modo que la evidencia vive en el repo y no en `%TEMP%`; `compileall`; `git diff --check`; sección de `README.md` en inglés.
 
 ## Criterios de aceptación
 - Con un slice activo, pulsar play entra por el inicio y no pasa del final; con loop `⟳` activo, repite; sin loop, vuelve al inicio en pausa.
@@ -161,7 +161,7 @@ Dos llamadores, un solo cuerpo (`_enforce_slice_boundary`): la señal del player
 
 **Verificación observada:** RED `ImportError: cannot import name 'resolve_slice_position'` (los 138 preexistentes en verde); GREEN `Ran 161 tests ... OK` = 138 preexistentes + 23 nuevos (15 de frontera pura, 8 de botón/mirroring). `compileall -q app\ui`: exit 0. `git diff --check`: limpio. Los tres re-ejecutados por el orquestador con el mismo resultado.
 
-**Límite explícito de la cobertura:** `MainWindow` NO se construye en los tests. Su `__init__` crea un `MediaRepository` real (lee y escribe `items.json`) y un `Pipeline` real, así que un test que lo construyera probaría el sistema de archivos tanto como el widget. El hueco que queda —que `_on_position_changed` esté cableado a estos helpers— es real y se registra como tal para la evidencia offscreen de T5, en lugar de fingir cobertura.
+**Límite explícito de la cobertura (superado en T5):** `MainWindow` NO se construía en los tests de T3. Su `__init__` creaba un `MediaRepository` real y un `Pipeline` real. T5 resolvió la construcción sustituyendo los dos nombres en el espacio de nombres del módulo — ver la sección de T5, que además encontró un `AttributeError` real en `_slice_bounds_ms`.
 
 **Observación para T5, no tocada aquí:** al terminar el slice la fila conserva el icono de pausa, igual que tras una pausa manual, y el status dice "Fin del slice.". Es coherente con el comportamiento existente y pulsar play reinicia el slice desde el inicio (por `_enter_slice_on_play`). Cambiar la semántica de pausa excede T3.
 
@@ -193,5 +193,47 @@ Es decir: **una ejecución con slice no completaba**. T1 borró `clear_marks` y 
 
 **Pendiente a propósito:** la segunda prueba manual real (slice que sobrevive a una ejecución de verdad). Queda para T5 junto con el resto de evidencia offscreen.
 
+### T5 — evidencia en el repo y segunda prueba manual real (cerrada)
+
+**El hueco de cobertura que T3 declaró cerrado encontró un CRASH real en el primer test.** T3 dijo, con honestidad, que `MainWindow` no se construía en ningún test porque su `__init__` crea un `MediaRepository` y un `Pipeline` reales, y que eso dejaba sin verificar si `_on_position_changed` estaba cableado a los helpers. La frase «no tiene por qué ser así» era la correcta: dos nombres se resuelven en el espacio de nombres de `app.ui.main_window` al construir la ventana, así que sustituirlos redirige **todos** sus efectos — `MediaRepository` a un `items.json` temporal, `Transcriber` a un doble. Lo que queda ejercitado es la lógica de la ventana, no los helpers sueltos que T3 ya cubrió.
+
+Y el primer test no encontró un test roto. Encontró esto:
+
+```
+AttributeError: 'SeekSlider' object has no attribute 'seconds'
+```
+
+`_slice_bounds_ms()` llamaba a `seek_slider.seconds()`, un método que **no existe**: `SeekSlider` expone `slice()`, que ya devuelve segundos. El camino era `_establish_timeline` → `_load_slice_for` → `_push_slice_to_players` → `_refresh_loop_availability` → `_slice_bounds_ms`, es decir **abrir cualquier medio con un slice almacenado reventaba**. Un `AttributeError` en una función que todo el T3 daba por probada. Sobrevive al T3 entero porque los tests de T3 usaban dobles para las ventanas y nunca layeron este método contra el slider real. El coste de una cobertura honesta no es una formalidad: es que encuentra lo que la cobertura decorativa no puede ver.
+
+**Tres de mis tests afirmaron cosas falsas sobre el contrato, y el código tenía razón.** Merece nombre porque son las tres formas típicas de escribir un test que no prueba nada:
+- «El seek libre muestra la posición pasada el final». No. Seek libre significa que el **objetivo** del seek del usuario no se recorta (T3 lo fija en los helpers puros); la señal `positionChanged` muestra la posición **resuelta**, porque para cuando llega, el player ya se salió del slice. Mi test afirmaba lo contrario de lo documentado.
+- «Con el handle arrastrado, el enforcement se ignora». El método **no hace nada** cuando `_seeking` está activo, así que el slider conserva lo que tenía. Mi test miraba el valor equivocado.
+- «La ejecución escribe `{"items": [...]}`». El JSON es una **lista** en la raíz.
+
+**Dos límites de Qt, resueltos conOTTOMía en vez de relajar el test:** un `QMediaPlayer` offscreen sin fuente ignora `setPosition` y siempre reporta 0, así que la decisión de la ventana se verifica contra un grabador de seeks; y `MediaList` no tiene setter de selección —la selección viene del current item del árbol—, así que la fila se selecciona como lo hace un clic y luego se pregunta a `selected_path` si está de acuerdo.
+
+**El guard sobre la inyección es lo que impide que estos tests mientan.** Si la sustitución dejara de tomar efecto, todo lo de arriba seguiría pasando en verde mientras carga un modelo de varios gigas o escribe en el `data/items.json` real. Así que en `setUp` se **afirma** que el doble llegó al pipeline y que el repositorio es el temporal, y hay un test aparte que lee `data/items.json` antes y después de construir la ventana y exige que sea idéntico. La primera versión de ese test afirmaba que el archivo real «no existe», lo cual es falso en un checkout que ya ha usado la app: la afirmación correcta es **no cambió**.
+
+**Segunda prueba manual real — medio real, modelo real, registro temporal.** `C:\Users\josea\Videos\2026-09-22 15-25-05.mkv` (151.6 s), `faster-whisper-tiny` en caché, slice `[60, 90]`:
+
+| Comprobación | Resultado observado |
+| --- | --- |
+| Duración real del player (PyAV sobre el MKV) | 151 567 ms |
+| Slice pintado desde disco | `(60000, 90000)` ms — el arreglo de `slice()` confirmado sobre medio real |
+| Loop habilitado con slice | `True` |
+| `progress_total` con ranges / sin ranges | **90.0 s** / 151.6 s |
+| Progreso final de la ejecución | **100%** con el total correcto; **59.4%** con la duración completa |
+| Segmentos transcritos (modelo real) | 4, primero `60.00 s`, último `90.00 s` |
+| Segmentos fuera del slice (+15 s de warmup) | **0** |
+| **Slice en disco después de la ejecución** | `[60.0, 90.0]` — **persiste** |
+| Segunda ejecución del mismo slice | 4 segmentos, mismos límites: **no se ensancha** |
+| Cierre de la ventana | sin excepciones |
+
+Ese 59.4% → 100% es el defecto de T4 medido sobre un archivo real, y el `slice` que sobrevive a dos ejecuciones reales es el criterio de aceptación, no una inferencia.
+
+**Verificación observada:** GREEN `Ran 197 tests ... OK` = 182 de T4 + 15 nuevos de T5. `compileall -q app tests`: exit 0. `git diff --check`: limpio. `README.md`: sección reescrita en inglés con el vocabulario del slice, la viñeta de features corregida y **cero** apariciones de «marca»/«tramo» en todo el archivo.
+
+**Lo que sigue sin cubrir, dicho sin adornos:** el overshoot audible del watchdog y el comportamiento del reproductor con medio real son temporales y no unit-testeables; la reproducción está cubierta por los helpers puros de T3 y por el cableado real de T5, pero el dato de «cuánto se pasa por encima del final con un archivo real» no está medido.
+
 ## Próximo paso
-T5: evidencia offscreen en el repo, sección de `README.md` en inglés, y la segunda prueba manual real sobre el slice persistente.
+Feature cerrada. T1–T5 commiteadas en `feat/slice-playback`; queda la decisión del mantenedor sobre la entrega (push/PR).

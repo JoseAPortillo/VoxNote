@@ -655,9 +655,10 @@ class MainWindow(QMainWindow):
         inverted or degenerate pair can never produce a position outside the
         media.
         """
-        if not self.seek_slider.slice():
+        seconds = self.seek_slider.slice()
+        if not seconds:
             return None
-        start, end = self.seek_slider.seconds()
+        start, end = seconds
         return (int(start * 1000), int(end * 1000))
 
     def _enter_slice_on_play(self) -> None:
