@@ -233,7 +233,29 @@ Ese 59.4% → 100% es el defecto de T4 medido sobre un archivo real, y el `slice
 
 **Verificación observada:** GREEN `Ran 197 tests ... OK` = 182 de T4 + 15 nuevos de T5. `compileall -q app tests`: exit 0. `git diff --check`: limpio. `README.md`: sección reescrita en inglés con el vocabulario del slice, la viñeta de features corregida y **cero** apariciones de «marca»/«tramo» en todo el archivo.
 
-**Lo que sigue sin cubrir, dicho sin adornos:** el overshoot audible del watchdog y el comportamiento del reproductor con medio real son temporales y no unit-testeables; la reproducción está cubierta por los helpers puros de T3 y por el cableado real de T5, pero el dato de «cuánto se pasa por encima del final con un archivo real» no está medido.
+### Overshoot real, medido
+
+El overshoot NO es un punto que se pueda leer: `player.position()` no expone posiciones continuas. Medido sobre el MKV real, **los únicos incrementos que expone son 42, 43, 64 y 76 ms** — el cuanto del propio reproductor. El player puede cruzar el final entre dos muestras y quedar rebobinado antes de que nadie lo observe, así que un muestreo por pico miente por construcción: la corrida «no cruzó» significa que el ojo no lo vio, no que no pasara.
+
+Por eso el overshoot se acota y no se afirma:
+
+- **cota inferior** = `fin − última posición observada dentro del slice` (ya había pasado del final)
+- **cota superior** = cota inferior + (`t_rebobinado` − `t_última_muestra`)
+
+Método: slice `[1, 4] s`, se entra a 300 ms del final, muestreo cada 10 ms, 5 repeticiones por configuración, ventana real (`QMediaPlayer` + `QAudioOutput`) sobre el archivo de 151 567 ms.
+
+| Configuración | Overshoot por carrera (inf–sup ms) | Global | Cadencia de `positionChanged` |
+|---|---|---|---|
+| Solo `positionChanged` (watchdog desactivado) | (32,43) (32,43) (32,42) (32,42) (32,42) | **32 – 43 ms** | mediana 53 ms · p90 75 ms · **máx 271 ms** |
+| Watchdog 100 ms activo | (32,42) (32,43) (32,44) (11,22) (32,43) | **11 – 44 ms** | mediana 52 ms · p90 74 ms · máx 75 ms |
+
+**Lo que dice el dato, sin adornos: el watchdog NO reduce el overshoot medible en esta máquina.** Ambas configuraciones dan el mismo orden de magnitud, enteramente explicado por el cuanto de reporte del reproductor (42–76 ms); el overshoot queda en torno a un tercio del intervalo de 100 ms del timer. El argumento de diseño de la línea 135 —«acotar el rebasamiento por ESE intervalo»— **no queda confirmado por esta medición**.
+
+Lo que sí sobrevive del argumento es otro: las emisiones de `positionChanged` **sí presentan huecos** (máximo observado 271 ms sin watchdog), así que existió al menos una vez una ventana real en la que el enforcement dependedió de una única señal tardía. El watchdog no se justifica por el overshoot medido en local, sino por no depender de una señal que el propio Qt no acota.
+
+Salvedades honestas del método: 5 repeticiones por configuración, una máquina, `QT_QPA_PLATFORM=offscreen`, decodificación local por ffmpeg; y la diferencia de máximo (271 ms vs 75 ms) se reprodujo en dos mediciones pero **no logré atribuirla a un mecanismo concreto**, así que no la reporto como beneficio del watchdog.
+
+**Lo que sigue sin cubrir:** el comportamiento del reproductor con medio real sigue siendo temporal y no unit-testeable; la reproducción continúa cubierta por los helpers puros de T3 y por el cableado real de T5.
 
 ## Próximo paso
 Feature cerrada. T1–T5 commiteadas en `feat/slice-playback`; queda la decisión del mantenedor sobre la entrega (push/PR).
