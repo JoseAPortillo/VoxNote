@@ -147,14 +147,22 @@ def progress_total(
 ) -> float:
     """Timeline length, in seconds, that progress is measured against.
 
-    ``info.duration`` is whisper's view of what it was handed: the whole file
-    when there are no ranges, but only the decoded chunk when there are. With
-    ranges the segment times are absolute, so progress has to be read on the
-    media timeline or a run over one range of a long file would claim to be
-    finished at the end of that range.
+    A whole-file run measures against the media's own length, which
+    ``info.duration`` already carries.
+
+    A scoped run measures against the LAST RANGE'S END, and ``path`` is not
+    touched at all. Segment times in a scoped run are ABSOLUTE on the media
+    timeline (``transcribe_segments`` adds the window offset back), so the last
+    segment of a 10-20 s slice ends at 20 s: 20 is what makes it read 100%.
+    ``info.duration`` is the DECODED CHUNK, not the slice, so it cannot stand in
+    for the end. And dividing by the slice's LENGTH would be worse than either:
+    absolute times over a length makes the bar start near 500% on a slice that
+    begins late in the file.
+
+    The end, then, not the length and not the chunk. Why the old code reached for
+    the container at all is the honest part: it added a full media open to every
+    run to compute a number the caller had already handed in.
     """
     if not ranges:
         return info.duration or 0.0
-    from app.services.clipper import duration
-
-    return duration(path)
+    return float(ranges[-1][1])

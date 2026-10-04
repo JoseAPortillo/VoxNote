@@ -90,6 +90,38 @@ def slice_entry_position(bounds: tuple[int, int] | None, position_ms: int) -> in
     return position_ms if start <= position_ms < end else start
 
 
+def slice_scope_note(loaded: str | None, selected: str | None) -> str:
+    """Why the painted slice will NOT scope a run of the selected media.
+
+    Empty when there is nothing to explain. The slice painted in both players
+    belongs to the LOADED media, whose duration is the denominator of its
+    geometry; a run targets the SELECTED row, because the transcript and
+    translation panes have always been per selection. The two are different
+    files as soon as the user clicks another row while something is playing, and
+    a slice of one can only scope a run of the other when the two ARE the same
+    file. So the difference is stated, instead of silently running the whole of
+    a media whose slice is painted on screen.
+
+    With nothing loaded there is no divergence: the slice is the selected
+    media's own stored one, no other file is on screen to be confused with, and
+    the run-start status already says whether it is in force.
+
+    Pure, for the same reason as :func:`resolve_slice_position`: the rule is
+    about two paths and nothing else, so it does not need a window to be
+    checked, and the previous inline version could only be reached by
+    constructing one.
+    """
+    if loaded is None or selected is None or loaded == selected:
+        return ""
+    # Both sides named, short enough to sit in a status line. It reads as a
+    # statement of fact, not as a warning about something the user did wrong:
+    # selecting a row while something else plays is normal use.
+    return (
+        f"Slice de «{Path(loaded).stem}» (cargado): "
+        f"no acota «{Path(selected).stem}», el seleccionado."
+    )
+
+
 class _EditableTextEdit(QPlainTextEdit):
     """Plain-text editor that marks programmatic document replacements.
 
@@ -132,10 +164,10 @@ class MainWindow(QMainWindow):
         self.resize(920, 720)
 
         self.repository = MediaRepository()
-        # The pipeline gets the same repository so a run can persist against it.
-        self.pipeline = Pipeline(
-            Transcriber(), target_lang=TRANSLATE_TARGET_LANG, repository=self.repository
-        )
+        # No repository here: a run does not consume its slice, so the pipeline has
+        # no reason to know about storage. This window owns persistence instead,
+        # writing results and the slice back through self.repository.
+        self.pipeline = Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)
         self._worker: InferenceWorker | None = None
         self._last_run: RunResult | None = None
         self._active_pane: str = "transcript"  # pane receiving live segments
@@ -974,29 +1006,12 @@ class MainWindow(QMainWindow):
     def _slice_scope_note(self) -> str:
         """Why the painted slice will NOT scope a run of the selected media.
 
-        Empty when there is nothing to explain. The slice painted in both
-        players belongs to the LOADED media, whose duration is the denominator of
-        its geometry; a run targets the SELECTED row, because the transcript
-        and translation panes have always been per selection. The two are
-        different files as soon as the user clicks another row while something
-        is playing, and a slice of one can only scope a run of the other when the
-        two ARE the same file. So the difference is stated instead of silently
-        running the whole of a media whose slice is painted on screen.
-
-        With nothing loaded there is no divergence: the slice is the selected
-        media's own stored one, no other file is on screen to be confused with,
-        and the run-start status already says whether it is in force.
+        Delegates to :func:`slice_scope_note`, which holds the rule; this only
+        supplies the two paths it needs. The rule is worth testing without a
+        window, and it was previously buried in a method that could only be
+        reached by constructing a ``MainWindow``.
         """
-        loaded = self._playing_path
-        if loaded is None:
-            return ""
-        selected = self.media_list.selected_path()
-        if selected is None or selected == loaded:
-            return ""
-        return (
-            f"Slice de «{Path(loaded).stem}» (el medio cargado): no acota "
-            f"«{Path(selected).stem}», que es el seleccionado para transcribir."
-        )
+        return slice_scope_note(self._playing_path, self.media_list.selected_path())
 
     def _load_slice_for(self, path: str | None) -> None:
         """Show the stored slice of ``path`` in both players.

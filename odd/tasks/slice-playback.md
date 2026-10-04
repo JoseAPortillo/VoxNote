@@ -55,7 +55,7 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 - [ ] T1: modelo y persistencia de un slice único. `normalize_slice()` reemplaza a `normalize_marks()`; `MediaItem.slice`; `update_slice()`; **traducción explícita de la clave `marks` legacy en `load()` antes de `MediaItem(**entry)`**; se borran `clear_marks` y `normalize_marks`. Pytest para `normalize_slice`, el round-trip y la carga legacy.
 - [ ] T2: handles en el slider. `HANDLE_HIT_PX` + hit-test; el press sobre un handle **no busca** (colisiona con el `mousePressEvent` actual de `seek_slider.py:154`, que hace seek); recorte a `[0, duración]` y a `MIN_SLICE_SECONDS`; pintado de handles activos y atenuados; se borran menú, tira de llaves, `pending_in`, `mark_pixel_rects`, `pending_pixel_rect`, `_hit_index`. Se reutilizan `_x_at_seconds` (`:216`) y `_position_seconds_at` (`:324`).
 - [x] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; watchdog que para o hace loop en el fin; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
-- [ ] T4: la ejecución usa el slice y deja de consumirlo. Se borran `_consume_marks` y `clear_marks`; `_run` toma `item.slice` de la **fila seleccionada**; el texto de divergencia pasa a ser una nota corta de "estás viendo X, se ejecutará Y" (ya no es un fallo de correctitud); el denominador de progreso usa la duración del slice.
+- [x] T4: la ejecución usa el slice y deja de consumirlo. Se borran `_consume_marks` y `clear_marks`; `_run` toma `item.slice` de la **fila seleccionada**; el texto de divergencia pasa a ser una nota corta de "estás viendo X, se ejecutará Y" (ya no es un fallo de correctitud); el denominador de progreso usa la duración del slice.
 - [ ] T5: verificación y documentación. Pytest de la lógica pura **y** de los widgets offscreen (`QT_QPA_PLATFORM=offscreen`), de modo que la evidencia vive en el repo y no en `%TEMP%`; `compileall`; `git diff --check`; sección de `README.md` en inglés.
 
 ## Criterios de aceptación
@@ -97,7 +97,7 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 
 **Riesgo nativo:** `medium` por `executable_change` en `app/core.models.py`, `review_due: true` por `slice_budget_reached`. El mantenedor **declinó la revisión de este candidato** (`consent: declined_this_candidate`, sin autoridad ni recibo creado). El rechazo es por candidato, no un apagado global.
 
-**Rama medio rota a propósito:** `app/ui/seek_slider.py:45` importa `normalize_marks` (ya no existe) y `app/services/pipeline.py:192` llama a `clear_marks` (borrado en T1). T2 y T4 los retiran. La reproducción funciona desde T2; la transcripción no hasta T4.
+**Rama medio rota a propósito:** `app/ui/seek_slider.py:45` importaba `normalize_marks` (ya no existe) y `app/services/pipeline.py:192` llamaba a `clear_marks` (borrado en T1). T2 retiró el primero y T4 el segundo. **La rama está entera desde T4**: reproducción acotada y ejecución con slice, las dos funcionando.
 
 ### T2 — handles arrastrables en el slider (cerrada)
 
@@ -126,7 +126,7 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 
 **Fuera del alcance estricto, justificado:** `theme.py` cambió de color. Renombrar las claves de propiedad quedó diferido, pero corregir un color para arreglar un defecto de contraste que esta tarea introdujo está dentro del alcance —y `markFillColor`/`markEdgeColor` los consume solo el slice.
 
-**Pendiente a propósito:** `app/services/` intacto. `pipeline.py:192` sigue llamando a `clear_marks` (borrado en T1) hasta T4.
+**Pendiente a propósito:** `app/services/` intacto. `pipeline.py:192` sigue llamando a `clear_marks` (borrado en T1) **hasta T4**, que lo retira. Resuelto en T4.
 
 ### T3 - reproducción acotada al slice en ambos reproductores (cerrada)
 
@@ -167,5 +167,31 @@ Dos llamadores, un solo cuerpo (`_enforce_slice_boundary`): la señal del player
 
 **Riesgo nativo:** RDD quedó **apagado a nivel de clone** por decisión del mantenedor antes de esta tarea (`receipt-driven development: off (decided by clone_local)`). No se intentó revisión nativa de T3 ni se fabricó JSON: el lineage de T2 sigue sin recibo y `review abandon` está prohibido por el propio STATUS. La verificación de esta tarea es la funcional de arriba, sin ceremony nativo.
 
+### T4 — la ejecución usa el slice y deja de consumirlo (cerrada)
+
+**Archivos**: `app/services/pipeline.py`, `app/services/transcriber.py`, `app/ui/main_window.py`, `tests/services/test_run_scoping.py` (nuevo). Sin dependencias nuevas.
+
+**El RED doorway fue más fuerte de lo previsto, y eso cambió el diagnóstico.** El primer fixture construía `Pipeline(transcriber=...)` sin repositorio, y el consumo solo era alcanzable **a través** de él: la prueba de persistencia pasaba **en vacío** contra el código viejo. Corregido el fixture para cablear el pipeline como lo cablea la app, el RED dejó de ser unaGpérdida de slice hipotética y fue el producto roto de verdad:
+
+```
+AttributeError: 'MediaRepository' object has no attribute 'clear_marks'
+```
+
+Es decir: **una ejecución con slice no completaba**. T1 borró `clear_marks` y dejó la llamada colgando; T4 la retira, y la rama vuelve a estar entera.
+
+**Se desató el acoplamiento entero, no solo la llamada.** `_consume_marks` era el ÚNICO uso de `self.repository` en el pipeline, así que el parámetro, el atributo, el import bajo `TYPE_CHECKING` y 25 líneas de docstring que justificaban el ciclo se fueron con él. Dos guards lo fijan: `repository` no está en la firma, y el pipeline **no tiene ningún atributo** cuyo nombre contenga `repo` — quitar el parámetro solo habría cerrado el acoplamiento a medias, dejando el almacenamiento a un `self.repository` de distancia de reintroducir.
+
+**El denominador de progreso era un defecto de producto, no una incomodidad.** `progress_total` con `ranges` llamaba `duration(path)`: una apertura completa del contenedor, en cada ejecución, para calcular un número que el llamador ya traía. Con tiempos absolutos, el total correcto es **el final del último range**, no `info.duration` (que es el *chunk decodificado*, no el medio) ni la *longitud* del slice (que dejaría la barra cerca de 500% en un slice que empieza tarde). El slice 10–20 s de un medio de 600 s marcaba 3.3%; ahora marca 100%.
+
+**Un test casi fijó el contrato equivocado y lo cambié antes de escribir producción.** `(5.0, 5.0)` es un slice degenerado pero su final son 5 s absolutas, no 0: devolver la longitud (0) dejaría el último segmento en 5 s sobre un total de 0 s. El test afirmaba `0.0`; el contrato afirma `5.0`.
+
+**La nota de divergencia se extrajo para poder probarla.** `_slice_scope_note` era un método que solo se alcanzaba construyendo un `MainWindow`, con todo lo que eso arrastra; ahora la regla es `slice_scope_note(loaded, selected)`, pura, y el método solo le pasa los dos caminos. Bajó de 96 a 74 caracteres y dejó de sonar a queja: nombra los dos medios y listo.
+
+**Vocabulario legacy en las status lines:** «tramo marcado» desapareció. Un status que habla de «tramo marcado» manda al usuario a buscar un segundo handle que ya no existe.
+
+**Verificación observada:** RED con la causa correcta (`AttributeError: clear_marks` ×3, `ImportError: slice_scope_note` ×5, `av.FileNotFoundError` en los 4 de progreso por la apertura del contenedor inexistente, 6 asserts de status/firma). GREEN `Ran 182 tests ... OK` = 161 de T3 + 21 nuevos. `compileall -q app tests`: exit 0. `git diff --check`: limpio. Sin llamadas a `clear_marks`/`_consume_marks` en todo el repo; los dos únicos `Pipeline(` de producción pasan ya sin repositorio.
+
+**Pendiente a propósito:** la segunda prueba manual real (slice que sobrevive a una ejecución de verdad). Queda para T5 junto con el resto de evidencia offscreen.
+
 ## Próximo paso
-T4: retirar `pipeline.py:192` (`clear_marks`), confirmar que el slice PERSISTE tras una ejecución y hacer la segunda prueba manual real.
+T5: evidencia offscreen en el repo, sección de `README.md` en inglés, y la segunda prueba manual real sobre el slice persistente.
