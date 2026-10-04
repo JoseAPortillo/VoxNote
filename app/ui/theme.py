@@ -94,8 +94,28 @@ LIGHT: dict[str, str] = {
     # 70% alpha is deliberate: the band must stay translucent so the played
     # sub-page and the handle both still read through it, which is why the
     # colour is darker rather than the alpha higher.
-    "mark_fill": "#b35c3700",  # rendered 3.73:1 against the light groove
-    "mark_edge": "#5c3700",  # rendered 5.40:1 against the light groove
+    #
+    # REVISED FOR THE SLICE, and the revision is the point of the two numbers.
+    # Those 70% values were measured for a translucent MARK sitting alone on
+    # the groove. The slice stacks an OPAQUE handle bar in mark_edge directly on
+    # top of that same translucent band, and mark_edge was the SAME hue as
+    # mark_fill's -- separated only by alpha. Composited, the band landed at
+    # #806742 and the bar at #5c3700: measured 1.97:1, i.e. the grip vanished
+    # into the range it is supposed to be the edge of. A handle you cannot pick
+    # out of its own band is not a handle.
+    #
+    # So the handle is now its own, much darker amber and the band alpha came
+    # down just enough to separate them. All THREE ratios have to hold at once,
+    # because the END handle overhangs the band's right edge and part of it sits
+    # on the bare groove -- handle vs groove cannot be traded for handle vs band:
+    #   band   vs groove  #a65c3700 -> #876f4e ->  3.34:1
+    #   handle vs groove  #2e1b00              -> 11.59:1
+    #   handle vs band                        ->  3.47:1
+    # 65% alpha is still deliberately translucent: the played sub-page has to
+    # read through the band, which is why the hue stays dark instead of the alpha
+    # going to 100%.
+    "mark_fill": "#a65c3700",  # rendered 3.34:1 against the light groove
+    "mark_edge": "#2e1b00",  # rendered 3.47:1 against that band, 11.59:1 vs groove
 }
 
 # -- seek slider geometry ----------------------------------------------------

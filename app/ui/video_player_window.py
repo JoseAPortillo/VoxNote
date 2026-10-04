@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.ui.seek_slider import MarksStrip, SeekSlider
+from app.ui.seek_slider import SeekSlider
 
 
 class _DoubleClickForwarder(QObject):
@@ -59,9 +59,9 @@ class _DoubleClickForwarder(QObject):
 class VideoPlayerWindow(QWidget):
     """Top-level video surface: QVideoWidget + play/pause + SeekSlider + time.
 
-    The in/out marks of the loaded media are shaded on the slider and mirrored
-    as ``{``/``}`` braces on the strip under it; both are driven from here so
-    this window shows exactly what the main window's bar shows.
+    The slice of the loaded media is drawn on the slider by its two handles,
+    driven from here so this window shows exactly what the main window's bar
+    shows.
 
     A double-click on the video image toggles play/pause, going through the same
     ``play_toggled`` signal as the button so there is a single play/pause path
@@ -73,20 +73,19 @@ class VideoPlayerWindow(QWidget):
         seek_pressed(): the user pressed the slider (click or drag start).
         seek_released(int): the user released the slider; seek to this ms.
         closed(): the window was closed via the titlebar X.
-        marks_changed(object, object, str): the user edited the in/out marks
-            from the slider's context menu. The payload is the slider's
-            ``marks_edited``: ``(marks, pending_in, message)``.
+        slice_changed(object, str): the user dragged a slice handle. The
+            payload is the slider's ``slice_edited``: ``(slice, message)``.
 
     Slots (called by MainWindow to sync the UI to the player state):
         set_source_title, set_duration, update_position, set_playing_state,
-        reset, set_marks, set_marks_editable.
+        reset, set_slice, set_slice_editable.
     """
 
     play_toggled = Signal(bool)
     seek_pressed = Signal()
     seek_released = Signal(int)
     closed = Signal()
-    marks_changed = Signal(object, object, str)
+    slice_changed = Signal(object, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -131,7 +130,7 @@ class VideoPlayerWindow(QWidget):
         self.slider.sliderReleased.connect(self._on_slider_released)
         # Signal-to-signal: MainWindow owns persistence and mirrors the edit to
         # the other player, so the window only relays the payload.
-        self.slider.marks_edited.connect(self.marks_changed)
+        self.slider.slice_edited.connect(self.slice_changed)
         bar.addWidget(self.slider, stretch=1)
 
         self.time_label = QLabel("00:00 / 00:00", controls)
@@ -139,10 +138,6 @@ class VideoPlayerWindow(QWidget):
         bar.addWidget(self.time_label)
 
         controls_layout.addLayout(bar)
-        # The braces under the groove: a read-only mirror of the same rects the
-        # slider shades, so the marked stretches stay readable in this window.
-        self.marks_strip = MarksStrip(self.slider, controls)
-        controls_layout.addWidget(self.marks_strip)
 
         layout.addWidget(controls)
         # Blank state: no source loaded yet (QSlider would default to 0..99).
@@ -187,35 +182,29 @@ class VideoPlayerWindow(QWidget):
             )
 
     def reset(self) -> None:
-        """Clear position, duration, play state and marks (before a new source).
+        """Clear position, duration, play state and slice (before a new source).
 
-        The marks go with it because they belong to the media that was loaded;
-        MainWindow paints the new media's own marks once its duration is known.
+        The slice goes with it because it belongs to the media that was loaded;
+        MainWindow shows the new media's own slice once its duration is known.
         """
         self._duration_ms = 0
         self.slider.setRange(0, 0)
         self.slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
         self.set_playing_state(False)
-        self.set_marks(None, 0)
+        self.set_slice(None, 0)
 
-    def set_marks(
-        self, marks, duration_ms: int, pending_in: float | None = None
-    ) -> None:
-        """Show the in/out marks of the loaded media over ``duration_ms``.
+    def set_slice(self, value, duration_ms: int) -> None:
+        """Show the slice of the loaded media over ``duration_ms``.
 
-        MainWindow passes the same marks it shows in its own bar, so the two
+        MainWindow passes the same slice it shows in its own bar, so the two
         views of one media never disagree.
         """
-        self.slider.set_marks(marks, duration_ms, pending_in)
-        # The strip repaints itself from marks_state_changed, but whether
-        # editing is allowed is its own state, so it follows the slider's.
-        self.marks_strip.set_marks_editable(self.slider.marks_editable())
+        self.slider.set_slice(value, duration_ms)
 
-    def set_marks_editable(self, editable: bool) -> None:
-        """Allow or block mark editing here and in the brace strip."""
-        self.slider.set_marks_editable(editable)
-        self.marks_strip.set_marks_editable(editable)
+    def set_slice_editable(self, editable: bool) -> None:
+        """Allow or block handle dragging here."""
+        self.slider.set_slice_editable(editable)
 
     # -- internals ------------------------------------------------------------
     def toggle_play_from_video(self) -> None:

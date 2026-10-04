@@ -29,7 +29,7 @@ from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
 from app.ui.media_list import MediaList
-from app.ui.seek_slider import MarksStrip, SeekSlider
+from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
@@ -77,8 +77,7 @@ class MainWindow(QMainWindow):
         self.resize(920, 720)
 
         self.repository = MediaRepository()
-        # The pipeline gets the same repository so a run that consumed the marks
-        # can clear them itself, on success, from the worker thread.
+        # The pipeline gets the same repository so a run can persist against it.
         self.pipeline = Pipeline(
             Transcriber(), target_lang=TRANSLATE_TARGET_LANG, repository=self.repository
         )
@@ -104,12 +103,9 @@ class MainWindow(QMainWindow):
         self._playing_path: str | None = None
         self._seeking = False
         self._duration_ms = 0
-        # A start mark with no end yet cannot be stored (normalize_marks would
-        # drop it), so it lives here, in memory, for the loaded media only.
-        self._pending_in: float | None = None
-        # Whether the run in flight consumed marks: decided once, before the
-        # worker starts, because the pipeline clears them from that thread.
-        self._run_used_marks = False
+        # Whether the run in flight was scoped by a slice: decided once, before
+        # the worker starts, so the status line can name it on completion.
+        self._run_used_slice = False
         self.video_window: VideoPlayerWindow | None = None  # lazy; hidden, not deleted
 
         self._dark = load_dark_setting()
@@ -151,22 +147,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.media_list, stretch=3)
 
         # Playback bar: seek slider + elapsed/total time (hidden until a
-        # source is loaded; durationChanged shows it), with the mark strip
-        # under it.
+        # source is loaded; durationChanged shows it). The slice is drawn by the
+        # slider itself, on its groove, so there is nothing else to add here.
         self.playback_bar = QWidget()
-        bar_column = QVBoxLayout(self.playback_bar)
-        bar_column.setContentsMargins(0, 0, 0, 0)
-        bar_column.setSpacing(2)
-        bar_layout = QHBoxLayout()
+        bar_layout = QHBoxLayout(self.playback_bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
         bar_layout.setSpacing(8)
         self.seek_slider = SeekSlider()
         self.time_label = QLabel("00:00 / 00:00")
         bar_layout.addWidget(self.seek_slider, stretch=1)
         bar_layout.addWidget(self.time_label)
-        bar_column.addLayout(bar_layout)
-        self.marks_strip = MarksStrip(self.seek_slider, self.playback_bar)
-        bar_column.addWidget(self.marks_strip)
         layout.addWidget(self.playback_bar)
         self.playback_bar.setVisible(False)
 
@@ -349,8 +339,7 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(self._on_position_changed)
         self.seek_slider.sliderPressed.connect(self._on_seek_pressed)
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
-        # marks_state_changed already reaches the mark strip, which owns it.
-        self.seek_slider.marks_edited.connect(self._on_marks_edited)
+        self.seek_slider.slice_edited.connect(self._on_slice_edited)
         self.btn_transcribe.clicked.connect(self._start_transcribe)
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
@@ -380,10 +369,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, self._dark)
-        # The mark shading is custom painting, so the theme only hands it new
-        # colors; re-pushing the marks is what repaints the open players with
-        # them right away, even when nothing else on screen is moving.
-        self._push_marks_to_players(self.seek_slider.marks())
+        # The slice is custom painting, so the theme only hands it new
+        # colors; re-pushing it is what repaints the open players with them
+        # right away, even when nothing else on screen is moving.
+        self._push_slice_to_players(self.seek_slider.slice())
         save_dark_setting(self._dark)
         self._update_theme_button()
 
@@ -436,25 +425,29 @@ class MainWindow(QMainWindow):
         run_sides = self._run_sides_for(pane)
         if item is not None and not self._confirm_replacing_notes(item, run_sides):
             return
-        # The marks are an INPUT of this run, not UI state: read them here,
+        # The slice is an INPUT of this run, not UI state: read it here,
         # before the worker starts, so the decision cannot be changed between
-        # reading and running. None means no marks and scopes nothing.
+        # reading and running. None means no slice and scopes nothing.
         #
         # The run targets the SELECTED row, because the transcript and
-        # translation panes have always been per selection. The marks painted in
-        # both players belong to the LOADED media instead, because their
-        # geometry is a fraction of the loaded media's duration. Those are two
-        # different files as soon as the user clicks another row while something
-        # is playing, and the marks of one can only scope a run of the other
-        # when the two ARE the same file, so a diverged run is unscoped and
-        # says so (see _marks_scope_note).
+        # translation panes have always been per selection. The slice painted in
+        # both players belongs to the LOADED media instead, because its geometry
+        # is a fraction of the loaded media's duration. Those are two different
+        # files as soon as the user clicks another row while something is
+        # playing, and the slice of one can only scope a run of the other when
+        # the two ARE the same file, so a diverged run is unscoped and says so
+        # (see _slice_scope_note).
         #
         # _playing_path is read HERE, on purpose: _stop_playback() below sets it
         # to None, so after that line the loaded media is unknowable.
         diverged = self._playing_path is not None and self._playing_path != path
-        scope_note = self._marks_scope_note()
-        ranges = item.marks if (item is not None and not diverged) else None
-        self._run_used_marks = bool(ranges)
+        scope_note = self._slice_scope_note()
+        stored = item.slice if (item is not None and not diverged) else None
+        # One pair, one range: the engines still take a LIST of ranges, so the
+        # slice is wrapped rather than spread. A run with no slice passes None,
+        # which every one of them reads as the whole file.
+        ranges = [tuple(stored)] if stored else None
+        self._run_used_slice = bool(ranges)
 
         self._stop_playback(reset_status=False)
         diarize = self.chk_diarize.isChecked()
@@ -473,12 +466,12 @@ class MainWindow(QMainWindow):
         self._refresh_scroll_sync()
         self.progress.setValue(0)
         # A scoped run returns only part of the media, so the status says so
-        # before the first segment arrives instead of surprising the user with
-        # a short transcript. The parenthesised scope is ALWAYS there now: a run
-        # with no marks is the whole file, and saying only "Iniciando…" left the
-        # user unable to tell the two cases apart while marks were on screen.
-        # The note then says WHY those marks are not in force.
-        scope = "solo los tramos marcados" if ranges else "archivo completo"
+        # before the first segment arrives instead of surprising the user with a
+        # short transcript. The parenthesised scope is ALWAYS there now: a run
+        # with no slice is the whole file, and saying only "Iniciando…" left the
+        # user unable to tell the two cases apart while a slice was on screen.
+        # The note then says WHY that slice is not in force.
+        scope = "solo el slice" if ranges else "archivo completo"
         start_text = f"Iniciando… ({scope})"
         if scope_note:
             start_text = f"{start_text}. {scope_note}"
@@ -530,7 +523,7 @@ class MainWindow(QMainWindow):
         window.play_toggled.connect(self._on_video_play_toggled)
         window.seek_released.connect(self._on_video_seek_released)
         window.closed.connect(self._on_video_window_closed)
-        window.marks_changed.connect(self._on_marks_edited)
+        window.slice_changed.connect(self._on_slice_edited)
         self.video_window = window
         return window
 
@@ -553,10 +546,8 @@ class MainWindow(QMainWindow):
         # Reset the timeline for the new source; _load_source re-establishes it
         # for this media (a re-entry of the same file announces no new duration,
         # so the re-range cannot wait for a signal). Nothing of the previous
-        # source may survive into this one: no range, no painted mark, no pending
-        # start.
+        # source may survive into this one: no range, no painted slice.
         self._seeking = False
-        self._pending_in = None
         self._establish_timeline(0)
         if self._is_video(path):
             self._start_video(path)
@@ -633,14 +624,12 @@ class MainWindow(QMainWindow):
         if self.video_window is not None:
             self.video_window.set_playing_state(False)
             self.video_window.hide()
-        # No media is loaded any more, so no mark can be painted: a start mark
-        # left pending would otherwise leak into the next source. The clearing
-        # goes through _establish_timeline(0) because that is the ONLY place
-        # that ranges a slider: assigning _duration_ms here left both bars
-        # ranged to the media that had just stopped while the marks were gone,
-        # i.e. range and marks disagreeing again -- the very invariant this
-        # method exists to keep.
-        self._pending_in = None
+        # No media is loaded any more, so no slice can be painted: one left over
+        # would otherwise leak into the next source. The clearing goes through
+        # _establish_timeline(0) because that is the ONLY place that ranges a
+        # slider: assigning _duration_ms here left both bars ranged to the media
+        # that had just stopped while the slice was gone, i.e. range and slice
+        # disagreeing again -- the very invariant this method exists to keep.
         self._establish_timeline(0)
         if reset_status:
             self.status_label.setText("Listo.")
@@ -668,7 +657,7 @@ class MainWindow(QMainWindow):
     def _on_duration_changed(self, duration: int) -> None:
         # Qt refines the duration while the media loads. The timeline is
         # rebuilt from the same single place the hand-over call uses, so range
-        # and marks cannot be set by two different paths.
+        # and slice cannot be set by two different paths.
         self._establish_timeline(duration)
 
     def _load_source(self, path: str) -> None:
@@ -683,21 +672,21 @@ class MainWindow(QMainWindow):
         self._establish_timeline()
 
     def _establish_timeline(self, duration: int | None = None) -> None:
-        """Rebuild the seek range AND the mark painting from one duration.
+        """Rebuild the seek range AND the slice painting from one duration.
 
-        The only place that ranges a slider, and it paints the marks in the same
+        The only place that ranges a slider, and it paints the slice in the same
         breath from the same duration and the same ``_playing_path``. Both views
         of the timeline therefore share one denominator and cannot drift apart,
-        and a media whose duration is unknown gets neither a range nor marks:
-        there is nothing to place a mark against.
+        and a media whose duration is unknown gets neither a range nor a slice:
+        there is nothing to place a handle against.
 
         ``duration=None`` asks the player instead of trusting an announced value.
 
         WHY THE CALLER MUST ASK, NOT ONLY LISTEN. The bug this replaces was a
         video window that stopped advancing its timeslider, and stopped showing
-        the marks, after re-entering a file it had already played: ``reset()``
+        the slice, after re-entering a file it had already played: ``reset()``
         left the range at ``0..0``, ``update_position`` clamped the value to 0
-        and ``_load_marks_for`` never ran, so both symptoms were the single fact
+        and ``_load_slice_for`` never ran, so both symptoms were the single fact
         that ``_on_duration_changed`` was the only thing that could restore the
         timeline. MEASURED on PySide6 6.11.2 with the ffmpeg backend, offscreen,
         for both a 30 s wav and the 292 s MKV: setting a source that is ALREADY
@@ -717,20 +706,20 @@ class MainWindow(QMainWindow):
         UNCONDITIONALLY: on a genuinely NEW source ``player.duration()`` answers
         0 on the very next line -- never the previous media's value -- and
         durationChanged arrives with the real one shortly after. So asking can
-        never place the new media's marks along the old media's timeline; the
+        never place the new media's slice along the old media's timeline; the
         worst it does is range nothing for the fraction of a second before the
         signal lands, and a media whose duration is genuinely unknown gets no
-        range and no marks, which is the truth.
+        range and no slice, which is the truth.
         """
         known = int(self.player.duration()) if duration is None else int(duration)
         self._duration_ms = max(0, known)
         self.seek_slider.setRange(0, self._duration_ms)
         if self.video_window is not None:
             self.video_window.set_duration(self._duration_ms)
-        # The marks are read for the LOADED media, which is the media whose
-        # duration just became the denominator of their geometry, and they are
-        # cleared outright when there is no timeline to place them on.
-        self._load_marks_for(self._playing_path if self._duration_ms > 0 else None)
+        # The slice is read for the LOADED media, which is the media whose
+        # duration just became the denominator of its geometry, and it is cleared
+        # outright when there is no timeline to place a handle on.
+        self._load_slice_for(self._playing_path if self._duration_ms > 0 else None)
         if self._duration_ms > 0 and (
             self._playing_path is None or not self._is_video(self._playing_path)
         ):
@@ -755,38 +744,38 @@ class MainWindow(QMainWindow):
         self.player.setPosition(self.seek_slider.value())
         self._sync_time_label(self.seek_slider.value())
 
-    # -- in/out marks ---------------------------------------------------------
-    def _push_marks_to_players(self, marks) -> None:
-        """Show the same marks in both players, over the current duration.
+    # -- slice ---------------------------------------------------------------
+    def _push_slice_to_players(self, value) -> None:
+        """Show the same slice in both players, over the current duration.
 
-        The marks belong to one media, so the audio bar and the video window
-        must always agree: one of them is where the user just edited and the
-        other is the mirror. ``marks`` is already normalized by the slider; the
-        duration is the denominator of the mark geometry, so both widgets get
+        The slice belongs to one media, so the audio bar and the video window
+        must always agree: one of them is where the user just dragged and the
+        other is the mirror. ``value`` is already normalized by the slider; the
+        duration is the denominator of the handle geometry, so both widgets get
         the same one and stay in step.
 
-        This cannot re-enter :meth:`_on_marks_edited`: only a user edit emits
-        ``marks_edited``, and ``set_marks`` emits ``marks_state_changed``.
+        This cannot re-enter :meth:`_on_slice_edited`: only a user drag emits
+        ``slice_edited``, and ``set_slice`` does not.
         """
-        self.seek_slider.set_marks(marks, self._duration_ms, self._pending_in)
+        self.seek_slider.set_slice(value, self._duration_ms)
         if self.video_window is not None:
-            self.video_window.set_marks(marks, self._duration_ms, self._pending_in)
+            self.video_window.set_slice(value, self._duration_ms)
 
-    def _marks_scope_note(self) -> str:
-        """Why the painted marks will NOT scope a run of the selected media.
+    def _slice_scope_note(self) -> str:
+        """Why the painted slice will NOT scope a run of the selected media.
 
-        Empty when there is nothing to explain. The marks painted in both
-        players belong to the LOADED media, whose duration is the denominator of
-        their geometry; a run targets the SELECTED row, because the transcript
+        Empty when there is nothing to explain. The slice painted in both
+        players belongs to the LOADED media, whose duration is the denominator of
+        its geometry; a run targets the SELECTED row, because the transcript
         and translation panes have always been per selection. The two are
         different files as soon as the user clicks another row while something
-        is playing, and marks of one can only scope a run of the other when the
+        is playing, and a slice of one can only scope a run of the other when the
         two ARE the same file. So the difference is stated instead of silently
-        running the whole of a media whose marks are painted on screen.
+        running the whole of a media whose slice is painted on screen.
 
-        With nothing loaded there is no divergence: the marks are the selected
-        media's own stored ones, no other file is on screen to be confused with,
-        and the run-start status already says whether they are in force.
+        With nothing loaded there is no divergence: the slice is the selected
+        media's own stored one, no other file is on screen to be confused with,
+        and the run-start status already says whether it is in force.
         """
         loaded = self._playing_path
         if loaded is None:
@@ -795,50 +784,48 @@ class MainWindow(QMainWindow):
         if selected is None or selected == loaded:
             return ""
         return (
-            f"Marcas de «{Path(loaded).stem}» (el medio cargado): no acotan "
+            f"Slice de «{Path(loaded).stem}» (el medio cargado): no acota "
             f"«{Path(selected).stem}», que es el seleccionado para transcribir."
         )
 
-    def _load_marks_for(self, path: str | None) -> None:
-        """Paint the stored marks of ``path`` in both players.
+    def _load_slice_for(self, path: str | None) -> None:
+        """Show the stored slice of ``path`` in both players.
 
         Called once the duration is known, because the duration is what places
-        the marks on the timeline. ``None`` (nothing loaded, or not registered)
-        means no marks, which is also the state a media without marks stores.
+        the handles on the timeline. ``None`` (nothing loaded, or not registered)
+        means no slice, which is also the state a media without a slice stores.
         """
-        marks = None
+        value = None
         if path is not None:
             index = self.repository.index_of(path)
             item = self.repository.get(index) if index is not None else None
             if item is not None:
-                marks = item.marks
-        self._push_marks_to_players(marks)
+                value = item.slice
+        self._push_slice_to_players(value)
 
-    def _on_marks_edited(self, marks, pending_in, message: str) -> None:
-        """Persist a mark edit made in either player and mirror it to both.
+    def _on_slice_edited(self, value, message: str) -> None:
+        """Persist a slice edit made in either player and mirror it to both.
 
-        The marks belong to the media whose timeline is LOADED IN THE PLAYER
+        The slice belongs to the media whose timeline is LOADED IN THE PLAYER
         (``self._playing_path``), not to the list selection: clicking a play
         icon does not change the selection, so the two can be different files,
-        and the bar the user marked on shows the loaded one. Writing them to the
-        selection would store them against a media nobody is looking at.
+        and the bar the user dragged on shows the loaded one. Writing it to the
+        selection would store it against a media nobody is looking at.
 
-        ``pending_in`` is display state and is never persisted: a start mark
-        with no end is not a range yet, and ``normalize_marks`` would drop it.
+        ``None`` is a real write, not a no-op: it is how returning both handles
+        to the extremes deletes the slice.
 
-        A run in flight cannot race this write: ``_set_busy`` blocks mark
-        editing, so the context menu cannot open while the worker holds the
-        marks it is about to clear.
+        A run in flight cannot race this write: ``_set_busy`` blocks handle
+        dragging, so no edit can be made while the worker is reading the item.
         """
         path = self._playing_path
         if path is None:
-            # Belt and braces: the menu is already disabled without a duration.
+            # Belt and braces: handles are ungrabbable without a duration.
             return
         index = self.repository.index_of(path)
         if index is not None:
-            self.repository.update_marks(index, marks)
-        self._pending_in = pending_in
-        self._push_marks_to_players(marks)
+            self.repository.update_slice(index, value)
+        self._push_slice_to_players(value)
         self.status_label.setText(message)
 
     # -- run results ----------------------------------------------------------
@@ -926,20 +913,19 @@ class MainWindow(QMainWindow):
         )
         self._refresh_scroll_sync()
         lang = result.translation_lang or result.transcript_lang
-        consumed_marks = self._run_used_marks
-        # The pipeline already cleared those marks in the repository; re-reading
-        # is what makes the shading disappear exactly when they are consumed,
-        # instead of leaving the user to guess the marks are still in force.
-        self._pending_in = None
-        self._load_marks_for(self._playing_path)
+        used_slice = self._run_used_slice
+        # The slice is NOT consumed by a run, so re-reading it here changes
+        # nothing on screen: it is kept so the painted handles can only ever
+        # come from storage, never from a value this window held on to.
+        self._load_slice_for(self._playing_path)
         text = f"Completado. Idioma detectado: {lang or '?'}."
-        if consumed_marks:
-            text += " Marcas consumidas."
+        if used_slice:
+            text += " Slice aplicado."
         self.status_label.setText(text)
         self._running_path = None
         self._run_snapshot = None
         self._run_sides = ()
-        self._run_used_marks = False
+        self._run_used_slice = False
         self._set_busy(False)
 
     def _persist_results(self, **fields) -> None:
@@ -965,14 +951,14 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self) -> None:
         """Restore edited notes over the original base results, if present.
 
-        It also announces a marks/selection divergence the moment it exists.
-        The marks stay painted, because they are the LOADED media's and their
-        geometry is true for what is loaded -- clearing them would be a lie in
-        the other direction ("this media has no marks") and would take away the
-        user's ability to edit or remove them. Leaving them up silently is what
-        made the run read as scoped by marks that were not scoping it, so the
-        status line names the two files instead. :meth:`_run` repeats the same
-        note at run start, when the scope actually matters.
+        It also announces a slice/selection divergence the moment it exists.
+        The slice stays painted, because it is the LOADED media's and its
+        geometry is true for what is loaded -- clearing it would be a lie in the
+        other direction ("this media has no slice") and would take away the
+        user's ability to edit or remove it. Leaving it up silently is what made
+        the run read as scoped by a slice that was not scoping it, so the status
+        line names the two files instead. :meth:`_run` repeats the same note at
+        run start, when the scope actually matters.
         """
         self._flush_notes_autosave()
         path = self.media_list.selected_path()
@@ -1009,7 +995,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_scroll_sync()
         self._refresh_buttons()
-        note = self._marks_scope_note()
+        note = self._slice_scope_note()
         if note:
             self.status_label.setText(note)
 
@@ -1023,14 +1009,13 @@ class MainWindow(QMainWindow):
             self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
         )
         self._refresh_scroll_sync()
-        # A failed run consumed nothing, so the marks are still stored: re-read
-        # them and repaint, and the UI can never disagree with storage.
-        self._pending_in = None
-        self._load_marks_for(self._playing_path)
+        # A failed run changed nothing, so the slice is still stored: re-read
+        # it and repaint, and the UI can never disagree with storage.
+        self._load_slice_for(self._playing_path)
         self._running_path = None
         self._run_snapshot = None
         self._run_sides = ()
-        self._run_used_marks = False
+        self._run_used_slice = False
         self._set_busy(False)
         self.status_label.setText("Error.")
         QMessageBox.critical(self, "Error", message)
@@ -1125,14 +1110,13 @@ class MainWindow(QMainWindow):
         self.media_list.setEnabled(not busy)
         self.pane_transcript.setEnabled(not busy)
         self.pane_translation.setEnabled(not busy)
-        # Not cosmetics: the pipeline clears the marks from the worker thread
-        # when the run succeeds, and the repository has no lock. Blocking the
-        # edit for the whole run is what keeps a mark written by the UI from
-        # being overwritten by that cleanup.
-        self.seek_slider.set_marks_editable(not busy)
-        self.marks_strip.set_marks_editable(not busy)
+        # Not cosmetics: a run in flight is reading this item, and the
+        # repository has no lock. Blocking the edit for the whole run keeps a
+        # slice written by the UI from contradicting the run the status line is
+        # about to report.
+        self.seek_slider.set_slice_editable(not busy)
         if self.video_window is not None:
-            self.video_window.set_marks_editable(not busy)
+            self.video_window.set_slice_editable(not busy)
         self._refresh_buttons(busy)
 
     def _refresh_buttons(self, busy: bool = False) -> None:

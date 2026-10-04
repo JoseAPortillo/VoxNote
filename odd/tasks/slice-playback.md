@@ -99,5 +99,34 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 
 **Rama medio rota a propósito:** `app/ui/seek_slider.py:45` importa `normalize_marks` (ya no existe) y `app/services/pipeline.py:192` llama a `clear_marks` (borrado en T1). T2 y T4 los retiran. La reproducción funciona desde T2; la transcripción no hasta T4.
 
+### T2 — handles arrastrables en el slider (cerrada)
+
+**Dos defectos REALES de producto, encontrados por el escritor y confirmados por el orquestador con una sonda independiente:**
+
+1. **El handle de fin era inalcanzable.** `_x_at_seconds` devuelve un **borde izquierdo**, que es lo correcto para una banda y lo incorrecto para un punto: en el final de la línea respondía columna `678` en un widget de 678 columnas cuya última columna dibujable es la `677`. Es decir, un píxel fuera del widget. Arrastrar el handle de fin al último columna mapeaba `59.91 s` sobre un archivo de 60 s, `slice()` nunca devolvía `None`, y **el gesto de "devolver ambos handles a casa para borrar el slice" no se podía completar**. Arreglo: `handle_x` fija la columna dentro del groove y el drag hace snap al borde DESPUÉS del clamp. Era un off-by-one heredado de la era de las marcas, donde `MIN_MARK_WIDTH_PX` lo compensaba y ya no queda nadie que compense.
+
+2. **El handle se tragaba su propia banda en tema claro: 1.97:1.** La causa no era el alpha: `mark_fill` `#b35c3700` y `mark_edge` `#5c3700` son **el mismo tono**, separados solo por alfa. Compuestos, la banda caía en `#806642` y la barra opaca en `#5c3700`. Esos valores se midieron en la era de las marcas para una marca **sola** sobre el groove; el slice apila una barra opaca sobre esa misma banda translúcida, una composición que no existía. Corregido a `#a65c3700` / `#2e1b00`.
+
+**Lo que el escritor NO hizo, y también importa:** no bajó el piso de contraste de la banda para disimular el defecto. El handle es un límite interactivo → 3.0 (WCAG 1.4.11). La banda es un indicador translúcido cuyo 1.86 en tema oscuro es preexistente y deliberado → piso 1.8, que sigue rechazando el `#4dde8f18` invisible (1.21). El defecto real (handle contra banda) queda clavado en 3.0.
+
+**Y una lección sobre el propio test:** los tests de pintado del escritor construían el widget contra la paleta Fusion **sin estilos**, así que `apply_theme` nunca se leía y las propiedades de color no se ejercitaban — el defecto de contraste era invisible para la suite. Añadió `TestPaintInBothThemes`, que aplica ambos temas y mide los tres ratios sobre píxeles renderizados.
+
+**De las 9 pruebas rojas iniciales, 8 eran comprobaciones mal escritas del propio escritor** (mayúsculas/lowercase, `QRect.right()` inclusivo, fixtures cuyo "no cruzar" limitaba antes que la línea de tiempo, casos de empate cuyo precondición no se cumplía, y asserts de milisegundos exactos que en realidad medían el *page step* de QSlider) y 1 era el defecto de producto. Se investigó cada una con sonda propia en vez de tocar producción para que un test pasara.
+
+**Constantes:** `HANDLE_HIT_PX = 6` (radio generoso: los handles son de ~4 px, así que 6 da margen sin ambigüedad con el playhead) y `MIN_SLICE_SECONDS = 0.1`.
+
+**Decisiones de diseño que el documento fijó y el código respeta literalmente:**
+- `slice()` **deriva** `None` de que los handles estén en los extremos; no es un estado almacenado. Por eso "sin slice" y "borrado" son la misma cosa.
+- `_clamp_to_timeline` **no** aplica `MIN_SLICE_SECONDS`: un slice guardado a mano tiene que volver exactamente como se guardó. El mínimo es invariante del **gesto**, y lo impone el drag. Esa distinción es lo que impide que el slider "corrija" datos que el usuario no tocó.
+- El pintado atenúa por alfa sobre **un** color, así los dos estados no pueden separarse en tono, y atenúa por "existe slice", no por posición: el handle que sigue en el extremo se lee activo cuando el otro ya se movió.
+
+**Verificación observada:** RED `ImportError: cannot import name 'normalize_marks'`; GREEN `138 tests` = 79 preexistentes (41 `tests/asr/` + 38 `tests/core/`) + 59 nuevos. `.venv\Scripts\python.exe -m unittest discover -s tests`: `Ran 138 tests ... OK`. `python -c "import app.ui.seek_slider, app.ui.main_window, app.ui.video_player_window"`: **OK — la app vuelve a importar su UI, que era el objetivo**. `compileall -q app`: exit 0. `git diff --check`: limpio. Los cuatro re-ejecutados por el orquestador con el mismo resultado.
+
+**Defecto de formato encontrado y corregido por el orquestador:** la primera línea del bloque de comentario de `main_window.py:468` había quedado en la columna 0. Legal en Python (los comentarios no participan del indentado, por eso los imports pasaban) pero descuidado.
+
+**Fuera del alcance estricto, justificado:** `theme.py` cambió de color. Renombrar las claves de propiedad quedó diferido, pero corregir un color para arreglar un defecto de contraste que esta tarea introdujo está dentro del alcance —y `markFillColor`/`markEdgeColor` los consume solo el slice.
+
+**Pendiente a propósito:** `app/services/` intacto. `pipeline.py:192` sigue llamando a `clear_marks` (borrado en T1) hasta T4.
+
 ## Próximo paso
-T2: handles en el slider.
+T3: reproducción acotada al slice en ambos reproductores + toggle `⟳` de loop A-B.

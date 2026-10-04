@@ -1,0 +1,1 @@
+"""UI tests for the single slice and its draggable handles."""
