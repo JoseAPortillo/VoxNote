@@ -49,14 +49,15 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 - **Los handles se pintan siempre; el slice existe solo si se movió uno.** Sin slice, los handles se dibujan atenuados en 0 y en la duración, y el estado persistido sigue siendo `None`. El contrato `None` = archivo completo queda intacto (los motores leen una lista **vacía** como "archivo completo", así que `[]` nunca puede ser el estado "sin slice"). Arrastrar un handle fuera de los extremos crea el slice; devolver **ambos** a los extremos lo vuelve a borrar. Un gesto, sin bandera extra ni menú.
 - **`RANGE_WARMUP` se mantiene** (15 s). Es lo que recuperó +45 % de caracteres en T10.
 - **El estado del loop `⟳` es de UI, no se persiste.** Es una preferencia de escucha, no un dato del medio.
-- **La posición mostrada se recorta al fin del slice** cuando el watchdog salta, para que la etiqueta de tiempo nunca mienta.
+- **La posición mostrada se recorta al fin del slice** cada vez que la frontera se aplica, para que la etiqueta de tiempo nunca mienta. La aplica `_on_position_changed`, que muestra la posición **resuelta** y no la reportada.
 
 ## Tareas
 - [ ] T1: modelo y persistencia de un slice único. `normalize_slice()` reemplaza a `normalize_marks()`; `MediaItem.slice`; `update_slice()`; **traducción explícita de la clave `marks` legacy en `load()` antes de `MediaItem(**entry)`**; se borran `clear_marks` y `normalize_marks`. Pytest para `normalize_slice`, el round-trip y la carga legacy.
 - [ ] T2: handles en el slider. `HANDLE_HIT_PX` + hit-test; el press sobre un handle **no busca** (colisiona con el `mousePressEvent` actual de `seek_slider.py:154`, que hace seek); recorte a `[0, duración]` y a `MIN_SLICE_SECONDS`; pintado de handles activos y atenuados; se borran menú, tira de llaves, `pending_in`, `mark_pixel_rects`, `pending_pixel_rect`, `_hit_index`. Se reutilizan `_x_at_seconds` (`:216`) y `_position_seconds_at` (`:324`).
-- [x] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; watchdog que para o hace loop en el fin; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
+- [x] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; la frontera se aplica desde `positionChanged`, que para al final o hace loop si el toggle está activo; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
 - [x] T4: la ejecución usa el slice y deja de consumirlo. Se borran `_consume_marks` y `clear_marks`; `_run` toma `item.slice` de la **fila seleccionada**; el texto de divergencia pasa a ser una nota corta de "estás viendo X, se ejecutará Y" (ya no es un fallo de correctitud); el denominador de progreso usa la duración del slice.
 - [x] T5: verificación y documentación. Pytest de la lógica pura **y** de los widgets offscreen (`QT_QPA_PLATFORM=offscreen`), de modo que la evidencia vive en el repo y no en `%TEMP%`; `compileall`; `git diff --check`; sección de `README.md` en inglés.
+- [x] T6: retirar el watchdog de 100 ms. La medición de «Overshoot real, medido» dio el **mismo** overshoot con y sin él (32–43 ms), así que la frontera se aplica **solo** desde `positionChanged`. Se borran `SLICE_WATCHDOG_INTERVAL_MS`, el `QTimer` y sus tres métodos, y sus ocho llamadas; se reescribe el párrafo de T3 que lo daba por no opcional. Se cubren los tres casos del camino que queda: dentro del slice no hace nada, al final sin loop para, al final con loop rebobina y sigue.
 
 ## Criterios de aceptación
 - Con un slice activo, pulsar play entra por el inicio y no pasa del final; con loop `⟳` activo, repite; sin loop, vuelve al inicio en pausa.
@@ -132,11 +133,15 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 
 **La decisión va primero, el cableado después.** El riesgo de acotar no es la señal: es la DECISIÓN en la frontera. Si un reproductor reporta 4.999 s en un slice que acaba en 5 s, ¿sigue, salta o se detiene? Eso es función pura de tres números, así que se escribió como una (`resolve_slice_position`) y se probó exacta, sin player ni ventana.
 
-**El watchdog que pedía el diseño, y por qué no es opcional.** La primera versión aplicará la frontera solo desde `positionChanged`, y eso NO cumple lo que este documento pide. `QMediaPlayer` emite sus cambios de posición en un intervalo que **no documenta**, así que acotar únicamente con ellas deja el final del slice holgado por un hueco desconocido y audible en cada slice. Por eso hay `QTimer` de 100 ms (`SLICE_WATCHDOG_INTERVAL_MS`) que consulta `player.position()` directamente: el rebasamiento queda acotado por ESE intervalo, al precio de diez comparaciones de enteros por segundo. Es exactamente el "watchdog" que pedía el diseño desde el principio.
+**El watchdog de 100 ms que pedía este diseño, y por qué ya no está.** El argumento original: `QMediaPlayer` emite sus cambios de posición en un intervalo que **no documenta**, así que acotar únicamente con `positionChanged` deja el final del slice holgado por un hueco desconocido y audible en cada slice. Por eso T3 metió un `QTimer` de 100 ms (`SLICE_WATCHDOG_INTERVAL_MS`) que consulta `player.position()` directamente: el rebasamiento quedaría acotado por ESE intervalo, al precio de diez comparaciones de enteros por segundo.
 
-Dos llamadores, un solo cuerpo (`_enforce_slice_boundary`): la señal del player y el polling del timer. Comparten el cuerpo porque si no acabarían discrepando sobre qué significa el final, y esa es la clase de defecto que este proyecto viene corrigiendo desde T1.
+**La medición de la sección «Overshoot real, medido» refutó ese argumento.** Sobre el MKV real el rebasamiento fue **32–43 ms sin el timer** y **11–44 ms con él**: el mismo orden de magnitud, y los dos explicados por el cuanto de reporte del propio reproductor (42–76 ms). El timer no reducía el rebasamiento que decía acotar. **Decisión del mantenedor (2026-10-04): se retira, y la frontera se aplica solo desde `positionChanged`.** Ver T6.
 
-**El watchdog se desarma en todos los finales, no solo en el suyo:** pausa manual (los dos caminos de pausa), `_stop_playback`, `EndOfMedia` (que ya pasaba por `_stop_playback`) y el propio fin de slice sin loop. Con loop encendido queda armado a propósito, porque es lo que sostiene el rebobinado. Quedaría armado solo en un caso: `playbackState()` sigue asincrónico tras `play()`, y ese estado ambiguo no es seguro para auto-desarmarse.
+**El riesgo que queda, sin adornos:** el rebasamiento ahora lo fija la cadencia de `positionChanged`, que Qt no acota — se observaron huecos de hasta 271 ms entre emisiones. Así que el audio puede pasarse algo en algún slice más que en otro, y **no está medido cuántas veces**. A cambio, la frontera vive en un solo sitio, y ese sitio lo cubren tres tests verificados rompiendo a propósito el código que vigilan.
+
+**Un llamador, un solo cuerpo (`_enforce_slice_boundary`):** la señal del player, y solo ella. Un único camino de aplicación es también un único sitio donde el final puede quedar mal escrito, que es la clase de defecto que este proyecto viene corrigiendo desde T1.
+
+**El armado y el desarmado desaparecieron con el timer.** La pausa manual (los dos caminos), `_stop_playback` y `EndOfMedia` ya no tienen nada que desarmar, y el fin de slice sin loop ya no detiene un temporizador: pausa el player directamente. La asimetría que queda es la de siempre —con loop no se pausa, que es lo que sostiene el rebobinado— y ya no arrastra detrás un `playbackState()` asincrónico que no era seguro para auto-desarmarse.
 
 **Doshelpers, no uno, porque son dos preguntas distintas.** `resolve_slice_position` recibe la posición que el player YA tiene mientras corre. `slice_entry_position` responde dónde EMPEZAR ante un play deliberado, cuando el player puede estar aparcado legítimamente en cualquier sitio. El seek es libre —el usuario puede dejar el player pasado el final a propósito—, así que solo el play es una petición de escuchar el slice. Confundirlas habría hecho que play arrancara desde el sitio equivocado.
 
@@ -233,6 +238,22 @@ Ese 59.4% → 100% es el defecto de T4 medido sobre un archivo real, y el `slice
 
 **Verificación observada:** GREEN `Ran 197 tests ... OK` = 182 de T4 + 15 nuevos de T5. `compileall -q app tests`: exit 0. `git diff --check`: limpio. `README.md`: sección reescrita en inglés con el vocabulario del slice, la viñeta de features corregida y **cero** apariciones de «marca»/«tramo» en todo el archivo.
 
+### T6 — retirada del watchdog de 100 ms (cerrada)
+
+**Archivos**: `app/ui/main_window.py`, `tests/ui/test_slice_wiring.py`, este documento. Sin dependencias nuevas.
+
+**El watchdog no tenía ni un test.** Ningún archivo de `tests/` lo mencionaba, así que la primera pregunta no era «qué se rompe» sino «qué se pierde al quitarlo». La respuesta: nada por sí solo, y por eso esta tarea también tuvo que tapar el hueco que dejaba detrás.
+
+**Lo que se borró, exactamente**: la constante `SLICE_WATCHDOG_INTERVAL_MS`, el `QTimer` y su cableado en `__init__`, los tres métodos `_on_slice_watchdog` / `_start_slice_watchdog` / `_stop_slice_watchdog`, y sus ocho llamadas. `QTimer` **no** salió del import de `QtCore`: lo sigue usando `_notes_save_timer`, que se comprobó antes de tocar el import en lugar de asumirlo.
+
+**El hueco era real y estaba en el lado de la ventana, no en el aritmético.** Los helpers puros de T3 ya cubrían los tres casos de la decisión —dentro del slice no pasa nada, al final rebobina y para, al final con loop rebobina y sigue—, pero devuelven una tupla `(posición, keep_playing)`. Lo que solo la ventana puede probar es la **consecuencia**: que una posición legal no emite ningún `setPosition`, que `keep_playing=False` llega de verdad al `pause()` del transporte, y que `keep_playing=True` **no** lo emite. Nada lo afirmaba. Con el watchdog fuera, `positionChanged` es el único que puede pausar, así que esa consecuencia pasó de estar compartida a estar sola y sin cubrir. Tres tests nuevos, y solo tres.
+
+**Los tres tests se rompieron a propósito, uno por uno, para comprobar que muerden** — porque un guard que nunca falla no ata nada. Con `if not keep_playing:` cambiado a `if True:`, falla **solo** el del loop. Sin el `self.player.pause()`, falla **solo** el del fin sin loop. Con `if target == position:` cambiado a `if False:`, falla **solo** el de la posición legal. En los tres casos exactamente un fallo, y el esperado.
+
+**Verificación observada:** GREEN `Ran 200 tests ... OK` = 197 de T5 + 3 nuevos. `compileall -q app tests`: exit 0. `git diff --check`: limpio. Cero apariciones de `watchdog` en `app/ui/main_window.py`, comprobado por grep.
+
+**Lo que NO se hizo, a propósito:** no se tocó la aritmética de `resolve_slice_position`, ni el orden «rebobinar primero, pausar después» (sigue siendo lo que evita que el loop rebote contra el final), ni se añadió ningún test del código retirado. La medición del overshoot no se repitió: la decisión se toma sobre los números ya registrados arriba.
+
 ### Overshoot real, medido
 
 El overshoot NO es un punto que se pueda leer: `player.position()` no expone posiciones continuas. Medido sobre el MKV real, **los únicos incrementos que expone son 42, 43, 64 y 76 ms** — el cuanto del propio reproductor. El player puede cruzar el final entre dos muestras y quedar rebobinado antes de que nadie lo observe, así que un muestreo por pico miente por construcción: la corrida «no cruzó» significa que el ojo no lo vio, no que no pasara.
@@ -249,13 +270,17 @@ Método: slice `[1, 4] s`, se entra a 300 ms del final, muestreo cada 10 ms, 5 r
 | Solo `positionChanged` (watchdog desactivado) | (32,43) (32,43) (32,42) (32,42) (32,42) | **32 – 43 ms** | mediana 53 ms · p90 75 ms · **máx 271 ms** |
 | Watchdog 100 ms activo | (32,42) (32,43) (32,44) (11,22) (32,43) | **11 – 44 ms** | mediana 52 ms · p90 74 ms · máx 75 ms |
 
-**Lo que dice el dato, sin adornos: el watchdog NO reduce el overshoot medible en esta máquina.** Ambas configuraciones dan el mismo orden de magnitud, enteramente explicado por el cuanto de reporte del reproductor (42–76 ms); el overshoot queda en torno a un tercio del intervalo de 100 ms del timer. El argumento de diseño de la línea 135 —«acotar el rebasamiento por ESE intervalo»— **no queda confirmado por esta medición**.
+**Lo que dice el dato, sin adornos: el watchdog NO reduce el overshoot medible en esta máquina.** Ambas configuraciones dan el mismo orden de magnitud, enteramente explicado por el cuanto de reporte del reproductor (42–76 ms); el overshoot queda en torno a un tercio del intervalo de 100 ms del timer. El argumento de diseño de la sección de T3 —«acotar el rebasamiento por ESE intervalo»— **no queda confirmado por esta medición**.
 
-Lo que sí sobrevive del argumento es otro: las emisiones de `positionChanged` **sí presentan huecos** (máximo observado 271 ms sin watchdog), así que existió al menos una vez una ventana real en la que el enforcement dependedió de una única señal tardía. El watchdog no se justifica por el overshoot medido en local, sino por no depender de una señal que el propio Qt no acota.
+Lo que sí sobrevive del argumento es otro, y es lo único que queda en pie: las emisiones de `positionChanged` **sí presentan huecos** (máximo observado 271 ms sin watchdog), así que existió al menos una vez una ventana real en la que el enforcement dependió de una única señal tardía. Ese era el argumento fuerte para **conservarlo** —no depender de una señal que el propio Qt no acota—, y era el que quedaba en pie cuando se escribió esto. La decisión de abajo lo pesó en contra: un temporizador que no reduce el overshoot medido no compra lo que promete, y el hueco de 271 ms se acepta como riesgo declarado.
 
 Salvedades honestas del método: 5 repeticiones por configuración, una máquina, `QT_QPA_PLATFORM=offscreen`, decodificación local por ffmpeg; y la diferencia de máximo (271 ms vs 75 ms) se reprodujo en dos mediciones pero **no logré atribuirla a un mecanismo concreto**, así que no la reporto como beneficio del watchdog.
+
+**Decisión del mantenedor (2026-10-04), tomada sobre estos números y no al revés:** el watchdog de 100 ms **se retira**. La frontera se aplica solo desde `positionChanged`. Ver T6.
 
 **Lo que sigue sin cubrir:** el comportamiento del reproductor con medio real sigue siendo temporal y no unit-testeable; la reproducción continúa cubierta por los helpers puros de T3 y por el cableado real de T5.
 
 ## Próximo paso
-Feature cerrada. T1–T5 commiteadas en `feat/slice-playback`; queda la decisión del mantenedor sobre la entrega (push/PR).
+Feature cerrada. T1–T6 commiteadas en `feat/slice-playback`; queda la decisión del mantenedor sobre la entrega (push/PR).
+
+**Lo que queda abierto a propósito, y no como olvido:** tras retirar el watchdog, el rebasamiento del final lo fija la cadencia de `positionChanged`, que Qt no acota (se vieron huecos de hasta 271 ms). **No se ha medido cuántas corridas se pasan de largo.** Si algún día molesta de verdad, el sitio para atacarlo ya no es un temporizador de rescate sino el reproductor: o un `positionChanged` con cadencia garantizada, o acotar el medio. Un temporizador de 100 ms ya está descartado por medición, así que volver a añadirlo sería repetir un experimento que dio negativo.

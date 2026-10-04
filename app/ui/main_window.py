@@ -34,11 +34,6 @@ from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
 
-# How often the boundary watchdog re-checks the player while it plays. See the
-# timer in MainWindow.__init__ for why the player's own notifications are not
-# enough on their own.
-SLICE_WATCHDOG_INTERVAL_MS = 100
-
 
 def resolve_slice_position(
     bounds: tuple[int, int] | None, position_ms: int, loop: bool
@@ -197,14 +192,6 @@ class MainWindow(QMainWindow):
         # preference about THIS viewing session, not a property of the media,
         # and a stored loop would silently bound a run's media on the next open.
         self._loop_enabled = False
-        # Boundary watchdog. A QMediaPlayer reports position changes at an
-        # interval it does not document, so the slice end cannot be enforced
-        # from those notifications alone without overshooting it. 100 ms is the
-        # coarse bound on how far past the end audio can leak, and it costs ten
-        # integer comparisons a second.
-        self._slice_watchdog = QTimer(self)
-        self._slice_watchdog.setInterval(SLICE_WATCHDOG_INTERVAL_MS)
-        self._slice_watchdog.timeout.connect(self._on_slice_watchdog)
         self.video_window: VideoPlayerWindow | None = None  # lazy; hidden, not deleted
 
         self._dark = load_dark_setting()
@@ -705,14 +692,12 @@ class MainWindow(QMainWindow):
         if self._playing_path == path:
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.player.pause()
-                self._stop_slice_watchdog()
                 self.status_label.setText("Reproducción pausada.")
                 if self._is_video(path):
                     self._sync_video_window_state(False)
             else:
                 self._enter_slice_on_play()
                 self.player.play()
-                self._start_slice_watchdog()
                 self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
                 if self._is_video(path):
                     self._sync_video_window_state(True)
@@ -732,7 +717,6 @@ class MainWindow(QMainWindow):
             self._load_source(path)
             self._enter_slice_on_play()
             self.player.play()
-            self._start_slice_watchdog()
             self.media_list.set_playing(path)
             self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
 
@@ -745,7 +729,6 @@ class MainWindow(QMainWindow):
         self._load_source(path)
         self._enter_slice_on_play()
         self.player.play()
-        self._start_slice_watchdog()
         self.media_list.set_playing(path)
         window.show()
         window.raise_()
@@ -771,11 +754,9 @@ class MainWindow(QMainWindow):
         if checked:
             self._enter_slice_on_play()
             self.player.play()
-            self._start_slice_watchdog()
             self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
         else:
             self.player.pause()
-            self._stop_slice_watchdog()
             self.status_label.setText("Reproducción pausada.")
         self.media_list.set_playing(path)
         self._sync_video_window_state(checked)
@@ -800,7 +781,6 @@ class MainWindow(QMainWindow):
         if self._playing_path is None:
             return
         self.player.stop()
-        self._stop_slice_watchdog()
         self.media_list.set_stopped(self._playing_path)
         self._playing_path = None
         self._seeking = False
@@ -919,12 +899,15 @@ class MainWindow(QMainWindow):
         position was already legal, which is what lets the caller skip the UI
         work on the overwhelmingly common in-slice case.
 
-        Two callers, deliberately one body. ``_on_position_changed`` reacts to the
-        player's own notifications, and the watchdog polls on a fixed interval,
-        because those notifications arrive at an interval the player does not
-        document -- a boundary enforced only on them can overshoot the end by up
-        to that unknown gap. Sharing the body is what keeps the two paths from
-        drifting into disagreeing about what the end means.
+        One caller, one body. ``_on_position_changed`` reacts to the player's own
+        notifications, and that is the whole enforcement path: the boundary is
+        applied from that signal alone. A 100 ms poll of ``player.position()``
+        used to run alongside it as a safety net, on the theory that the player's
+        notification cadence is undocumented and could therefore leave the end
+        slack. Measured on a real file the poll changed nothing: both paths
+        overshoot by the same 32-43 ms, which is the player's own
+        position-reporting quantum (42-76 ms). So it was removed rather than kept
+        on a promise it did not keep.
         """
         target, keep_playing = resolve_slice_position(
             self._slice_bounds_ms(), position, self._loop_enabled
@@ -938,7 +921,6 @@ class MainWindow(QMainWindow):
         self.player.setPosition(target)
         if not keep_playing:
             self.player.pause()
-            self._stop_slice_watchdog()
             self.status_label.setText("Fin del slice.")
             self._sync_video_window_state(False)
         return target, True
@@ -953,28 +935,6 @@ class MainWindow(QMainWindow):
         self._sync_time_label(target)
         if self.video_window is not None:
             self.video_window.update_position(target)
-
-    def _on_slice_watchdog(self) -> None:
-        """Poll the boundary on a fixed interval while playback runs.
-
-        The player notifies position changes at an interval it does not document,
-        so relying on ``positionChanged`` alone bounds the slice only as loosely
-        as that unknown cadence -- audible overshoot at the end of every slice.
-        Polling ``position()`` directly bounds the overshoot by this timer
-        instead, at the cost of ten cheap comparisons a second.
-        """
-        if self._playing_path is None:
-            self._stop_slice_watchdog()
-            return
-        self._enforce_slice_boundary(int(self.player.position()))
-
-    def _start_slice_watchdog(self) -> None:
-        """Arm the boundary poll. Paired with every ``player.play()``."""
-        self._slice_watchdog.start()
-
-    def _stop_slice_watchdog(self) -> None:
-        """Disarm the boundary poll. Paired with every ``player.pause()``."""
-        self._slice_watchdog.stop()
 
     def _on_seek_pressed(self) -> None:
         self._seeking = True

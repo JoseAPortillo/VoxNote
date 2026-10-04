@@ -67,12 +67,15 @@ class _RecordingPlayer:
     Offscreen, a ``QMediaPlayer`` with no source silently ignores ``setPosition``
     and always reports 0, so asserting on it would test Qt's no-source behaviour
     instead of the window's. Every ``setPosition`` the window issues is recorded,
-    which is the whole claim: what position did the window decide on?
+    which is the whole claim: what position did the window decide on? ``pauses``
+    counts the same way, because whether the window paused is the other half of
+    the boundary decision.
     """
 
     def __init__(self, position: int = 0):
         self._position = position
         self.writes: list[int] = []
+        self.pauses = 0
 
     def position(self) -> int:
         return self._position
@@ -91,7 +94,7 @@ class _RecordingPlayer:
         pass
 
     def pause(self) -> None:
-        pass
+        self.pauses += 1
 
     def playbackState(self):  # noqa: N802 - Qt's own spelling
         from PySide6.QtMultimedia import QMediaPlayer
@@ -173,6 +176,43 @@ class MainWindowSliceWiring(unittest.TestCase):
         self._load_with_slice()
         self.window._on_position_changed(25_000)
         self.assertEqual(self.window.seek_slider.value(), 10_000)
+
+    def test_a_legal_position_is_left_alone(self):
+        # The overwhelmingly common case, and the one the pure helpers cannot
+        # reach: they prove the arithmetic of the decision, but only the window
+        # can prove it has NO side effect here. A rewind on a legal report would
+        # fight a player that is behaving, and nothing else would catch it.
+        self._load_with_slice()
+        recorder = _RecordingPlayer(15_000)
+        self.window.player = recorder
+        self.window._on_position_changed(15_000)
+        self.assertEqual(recorder.writes, [])
+        self.assertEqual(self.window.seek_slider.value(), 15_000)
+
+    def test_reaching_the_end_without_the_loop_stops_the_player(self):
+        # The rewind is only half of this behaviour: with the loop off, playback
+        # must also STOP. ``positionChanged`` is the only thing that can pause it
+        # now, so the window is what has to issue the pause -- the pure helper's
+        # ``keep_playing`` flag is not the transport.
+        self._load_with_slice()
+        recorder = _RecordingPlayer(20_000)
+        self.window.player = recorder
+        self.window._on_position_changed(20_000)
+        self.assertEqual(recorder.writes, [10_000])
+        self.assertEqual(recorder.pauses, 1)
+
+    def test_reaching_the_end_with_the_loop_on_keeps_playing(self):
+        # The other half of the same decision, and the branch nothing covered:
+        # with the loop on, the slice has to REPEAT, so it rewinds and must NOT
+        # pause. A pause here would quietly turn the loop into a stop, which is
+        # a defect no user would report as "the loop button is broken".
+        self._load_with_slice()
+        self.window._on_loop_toggled(True)
+        recorder = _RecordingPlayer(21_000)
+        self.window.player = recorder
+        self.window._on_position_changed(21_000)
+        self.assertEqual(recorder.writes, [10_000])
+        self.assertEqual(recorder.pauses, 0)
 
     def test_a_seek_while_the_handle_is_held_is_ignored(self):
         # Dragging the end handle moves the slider past the current position on
