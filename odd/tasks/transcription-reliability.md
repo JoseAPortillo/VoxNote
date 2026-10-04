@@ -87,8 +87,11 @@ which is a second reason that model was out).
 - [x] F0: harness versioned in the repo, committed. 41/41 unit tests green.
 - [x] F1: baseline of M1-M5 on the reference MKV. See evidence.
 - [x] F2: decode options measured. **Negative result — keep the current options.**
-- [x] F3: sentence grouper built and measured. **Mechanically sound, but cannot fix
-  M1 — the audio yields no punctuation. Not wired into production.**
+- [x] F3: sentence grouper built and measured. **Superseded: M1 IS reachable.** The
+  cause is `condition_on_previous_text=True` decaying the punctuation, not the audio.
+  Chunked re-prompting takes M1 from 0.000 to 0.381 on the reference file.
+- [ ] F6: build the chunked path (fresh prompt per chunk + warmup seams + grouping) and
+  measure it against this baseline before touching production.
 - [x] F4: `large-v3` compared against turbo. **Turbo wins on coverage and speed.**
 - [ ] F5: decision recorded; interface abstracted only if warranted.
 
@@ -118,26 +121,66 @@ with whisper**, and no decode option, prompt, grouping or model change reaches i
 Reporting it as fixable without this evidence would have spent the whole exercise on a
 target that does not exist.
 
+## The real cause: the prompt decays within one transcribe() call (F3, corrected)
+The first reading of this phase was wrong twice, and both corrections came from checking
+the underlying thing instead of trusting a metric.
+
+**Correction 1 — the speaker does make phrase breaks.** Inter-region pauses on the
+reference file: 56 of 1.0 s or more (22.7 % of the file), 43 of 1.2 s or more, 21 of 2.0 s
+or more. Whisper's units average 10.4 s, which matches those pauses, so segmentation was
+already pause-aligned and the units were not arbitrarily chopped. The conclusion that "the
+speaker does not punctuate, so option C" was **refuted by its own falsifier**.
+
+**Correction 2 — punctuation is recoverable.** `initial_prompt` punctuates a fresh 90 s
+window completely: 15 periods, 3 exclamation marks and 1 question mark in 730 characters,
+against zero without it. But over the whole file the same prompt yields **1 period**. The
+mechanism is `condition_on_previous_text=True`: every 30 s window is conditioned on the
+model's own output, and once that output has no punctuation the next window inherits and
+reinforces it. The prompt conditions the start of the file and its influence decays.
+
+Measured on the full reference file, counting characters directly rather than via M1:
+
+| Configuration | `.` | `,` | units ending a sentence |
+|---------------|-----|-----|-------------------------|
+| current app options | **0** | 0 | 0/45 = 0.000 |
+| `initial_prompt` only | 1 | 0 | 0/40 = 0.000 |
+| `initial_prompt` + `condition_on_previous_text=False` | 11 | 2 | 2/39 = 0.051 |
+| `condition_on_previous_text=False` only | 11 | 6 | 5/45 = 0.111 |
+| **`initial_prompt` re-applied per 60 s chunk** | **42** | **16** | 16/42 = **0.381** |
+| _(ceiling: one fresh 90 s window)_ | 15 in 730 | 3 | density 0.0205/char |
+
+Chunked re-prompting reaches 0.0122 punctuation per character against the 0.0031 of a
+single prompted call. It works because it removes the reinforcement loop: a fresh
+`initial_prompt` per chunk resets the prior each time.
+
+**The trade, stated plainly.** Chunking restores punctuation but introduces seams: 3442
+characters against the 3684 single-call baseline, and a chunk boundary lands mid-sentence
+("...really arguing standing kind" | "This close and front facing"). So it relocates the
+defect rather than eliminating it, and closing the seams needs the warmup overlap
+`clipper.RANGE_WARMUP` already implements and already measured, plus the sentence
+grouper to absorb the joins. That is a real design, not a guess, and it is not built yet.
+
 ### What the grouper is actually worth
 `app/services/sentences.py` works: 738 timed words → 39 units, 3548 chars against a
 3543-char window baseline, every unit closed at a pause rather than at a window edge,
 none overlapping, median 73 chars against 96. Text is preserved exactly. Breaks become
-meaningful instead of arbitrary. That is a real gain in readability, and it is **not**
-phrase completeness. Keeping those two apart is the whole point of this phase.
+meaningful instead of arbitrary. That is readability, not phrase completeness, and it
+becomes load-bearing rather than optional once chunk seams exist.
 
 ### Not wired into production, on purpose
-Two reasons, both measured rather than assumed:
-- The gain it delivers is not the gain F3 was chartered to deliver.
+- The gain F3 was chartered to deliver (complete sentences) is only reachable through the
+  chunked path, which is unbuilt and unmeasured in production.
 - `Pipeline` translates each segment independently and already documents that this
-  "loses cross-sentence context". Shorter units make that worse, and nothing in this
-  repository measures translation quality yet. Shipping a change that might degrade the
-  translated pane to improve readability is a trade, not a fix.
+  "loses cross-sentence context". Nothing in this repository measures translation quality
+  yet, so changing the unit size on the transcription pane could silently degrade the
+  translated one. That trade needs measuring, not assuming.
 
 ### F4: large-v3 loses to turbo on both counts
 `large-v3` reaches 0.899 speech coverage with **28.36 s** of speech in gaps, against
 turbo's 0.979 and 5.69 s, and runs at 5.4x real-time against turbo's 58x. More
 characters (3813 vs 3543) is not more content; it is more invention on a bed this hard.
-Turbo stays, and the app needs no model change.
+Turbo stays, and the app needs no model change. The punctuation finding is model
+agnostic: `large-v3` prompted on the excerpt gave 7 periods and 6 commas in 651 chars.
 
 ## Progress
 - **F0 done.** `tests/asr/metrics.py` holds M1-M5 as pure functions over (segments,
@@ -239,8 +282,9 @@ have "proven" that turning on word timestamps destroys the transcription. The on
 that did not happen is that the sweep looked implausible and got investigated.
 
 ## Next step
-Blocked on a product decision, not on missing evidence. The evidence says the output has
-no sentences to find. Options: accept the run-on text as inherent to this audio; apply the
-grouper plus capitalisation so units at least read as sentences; or attack the audio
-itself, since a quiet voice under music is the one thing all of this agrees is the root
-condition. Nothing is blocked on engineering.
+The evidence now points at one concrete implementation rather than a product choice:
+decode in chunks with a fresh `initial_prompt` per chunk, overlap them by
+`clipper.RANGE_WARMUP` to close the seams, and group the words into sentences to absorb
+the joins. Every part of that already exists in this repository; none of it is wired
+together, and the two known costs are seam artifacts and shorter translation units.
+Measure that path against the current baseline before changing production.
