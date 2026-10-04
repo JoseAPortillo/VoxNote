@@ -350,6 +350,42 @@ QPushButton#playButton:checked:pressed {
     border-color: $accent_pressed;
 }
 
+/* Slice loop. Same accent surface as the play button's "playing" state, so "on"
+   reads identically in both windows. The glyph is recolored through QSS here
+   instead of in code, unlike the play button's icon, which is a QIcon the window
+   rebuilds. The :checked rule is not optional decoration: without it the control
+   toggles with no visible change at all, and the user cannot tell whether the
+   slice is looping. Disabled is declared after :checked on purpose, so a checked
+   loop with no slice to loop reads as unavailable rather than active. */
+QPushButton#loopButton {
+    background-color: $button_bg;
+    border: 1px solid $border;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-width: 28px;
+    min-height: 20px;
+}
+QPushButton#loopButton:hover { background-color: $hover; border-color: $border_hover; }
+QPushButton#loopButton:pressed { background-color: $pressed; }
+QPushButton#loopButton:checked {
+    background-color: $accent;
+    border-color: $accent;
+    color: $accent_text;
+}
+QPushButton#loopButton:checked:hover {
+    background-color: $accent_hover;
+    border-color: $accent_hover;
+}
+QPushButton#loopButton:checked:pressed {
+    background-color: $accent_pressed;
+    border-color: $accent_pressed;
+}
+QPushButton#loopButton:disabled {
+    background-color: $surface_alt;
+    color: $disabled;
+    border-color: $surface_alt;
+}
+
 QLabel#videoTimeLabel {
     color: $text_muted;
     font-size: 12px;

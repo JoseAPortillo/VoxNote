@@ -54,7 +54,7 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 ## Tareas
 - [ ] T1: modelo y persistencia de un slice único. `normalize_slice()` reemplaza a `normalize_marks()`; `MediaItem.slice`; `update_slice()`; **traducción explícita de la clave `marks` legacy en `load()` antes de `MediaItem(**entry)`**; se borran `clear_marks` y `normalize_marks`. Pytest para `normalize_slice`, el round-trip y la carga legacy.
 - [ ] T2: handles en el slider. `HANDLE_HIT_PX` + hit-test; el press sobre un handle **no busca** (colisiona con el `mousePressEvent` actual de `seek_slider.py:154`, que hace seek); recorte a `[0, duración]` y a `MIN_SLICE_SECONDS`; pintado de handles activos y atenuados; se borran menú, tira de llaves, `pending_in`, `mark_pixel_rects`, `pending_pixel_rect`, `_hit_index`. Se reutilizan `_x_at_seconds` (`:216`) y `_position_seconds_at` (`:324`).
-- [ ] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; watchdog que para o hace loop en el fin; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
+- [x] T3: reproducción acotada en los dos reproductores. Play entra por el inicio; watchdog que para o hace loop en el fin; toggle `⟳` checkable en la fila de control de audio y de video; recorte de la posición mostrada al fin.
 - [ ] T4: la ejecución usa el slice y deja de consumirlo. Se borran `_consume_marks` y `clear_marks`; `_run` toma `item.slice` de la **fila seleccionada**; el texto de divergencia pasa a ser una nota corta de "estás viendo X, se ejecutará Y" (ya no es un fallo de correctitud); el denominador de progreso usa la duración del slice.
 - [ ] T5: verificación y documentación. Pytest de la lógica pura **y** de los widgets offscreen (`QT_QPA_PLATFORM=offscreen`), de modo que la evidencia vive en el repo y no en `%TEMP%`; `compileall`; `git diff --check`; sección de `README.md` en inglés.
 
@@ -128,5 +128,44 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 
 **Pendiente a propósito:** `app/services/` intacto. `pipeline.py:192` sigue llamando a `clear_marks` (borrado en T1) hasta T4.
 
+### T3 - reproducción acotada al slice en ambos reproductores (cerrada)
+
+**La decisión va primero, el cableado después.** El riesgo de acotar no es la señal: es la DECISIÓN en la frontera. Si un reproductor reporta 4.999 s en un slice que acaba en 5 s, ¿sigue, salta o se detiene? Eso es función pura de tres números, así que se escribió como una (`resolve_slice_position`) y se probó exacta, sin player ni ventana.
+
+**El watchdog que pedía el diseño, y por qué no es opcional.** La primera versión aplicará la frontera solo desde `positionChanged`, y eso NO cumple lo que este documento pide. `QMediaPlayer` emite sus cambios de posición en un intervalo que **no documenta**, así que acotar únicamente con ellas deja el final del slice holgado por un hueco desconocido y audible en cada slice. Por eso hay `QTimer` de 100 ms (`SLICE_WATCHDOG_INTERVAL_MS`) que consulta `player.position()` directamente: el rebasamiento queda acotado por ESE intervalo, al precio de diez comparaciones de enteros por segundo. Es exactamente el "watchdog" que pedía el diseño desde el principio.
+
+Dos llamadores, un solo cuerpo (`_enforce_slice_boundary`): la señal del player y el polling del timer. Comparten el cuerpo porque si no acabarían discrepando sobre qué significa el final, y esa es la clase de defecto que este proyecto viene corrigiendo desde T1.
+
+**El watchdog se desarma en todos los finales, no solo en el suyo:** pausa manual (los dos caminos de pausa), `_stop_playback`, `EndOfMedia` (que ya pasaba por `_stop_playback`) y el propio fin de slice sin loop. Con loop encendido queda armado a propósito, porque es lo que sostiene el rebobinado. Quedaría armado solo en un caso: `playbackState()` sigue asincrónico tras `play()`, y ese estado ambiguo no es seguro para auto-desarmarse.
+
+**Doshelpers, no uno, porque son dos preguntas distintas.** `resolve_slice_position` recibe la posición que el player YA tiene mientras corre. `slice_entry_position` responde dónde EMPEZAR ante un play deliberado, cuando el player puede estar aparcado legítimamente en cualquier sitio. El seek es libre —el usuario puede dejar el player pasado el final a propósito—, así que solo el play es una petición de escuchar el slice. Confundirlas habría hecho que play arrancara desde el sitio equivocado.
+
+**Dos decisiones de frontera que merecen nombre, porque aunque parezcan arbitrarias no lo son:**
+- El final es `end`, no `end - 1`. El milisegundo es la resolución del propio player; restarle uno recortaría la cola de todos los slices.
+- "En o más allá del final" es UN caso, no dos. El player nunca para exactamente en la frontera: reporta a su propia cadencia, así que el primer informe posterior al final ya está pasado. Manejar solo `== end` dejaría el medio sonar de más.
+
+**Orden que importa en la corrección:** rebobinar PRIMERO, pausar después. Pausar primero dejaría al player emitir un informe más allá del final, y el loop rebotaría contra el final en vez de asentarse en el inicio.
+
+**Defecto encontrado por el orquestador, no por los tests:** el botón `⟳` era un `QPushButton` checkable SIN ninguna regla `:checked` para `#loopButton` en `theme.py`. Todos los tests de estado pasan igual sobre un botón que alterna con **cero cambio visible**: `isChecked()` nunca consulta la hoja de estilos. El usuario hacía clic, el modelo decía "en bucle" y la pantalla se veía idéntica. Se añadió la regla accent (misma superficie que `#playButton:checked`, para que "encendido" se lea igual en ambas ventanas) y el test que lo ata muestrea **píxeles renderizados** en los dos temas.
+
+**Y ese test se verificó rompiendo la regla a propósito:** con `#loopButton:checked` renombrado a un selector inexistente, el guard falla en ambos temas (`#33353f == #33353f` en oscuro, `#ffffff == #ffffff` en claro). Un guard que nunca falla no ata nada. Muestreados con la regla puesta: oscuro `#33353f` → `#4f8cff`, claro `#ffffff` → `#2f6fed`, el accent real en cada uno.
+
+**Contraste del glifo, medido y NO arreglado a propósito:** texto `$accent_text` (`#ffffff`) sobre `$accent` mide **3.22:1 en oscuro** y 4.55:1 en claro. El oscuro queda bajo el piso de 4.5:1 para texto normal, pero es exactamente el par de tokens que ya publican `#primaryButton` y `#playButton:checked`; subirlo exige cambiar el accent de toda la paleta y mover controles fuera de alcance. Se registra como valor de casa preexistente y compartido, no se disimula bajando el umbral del test. El glifo se recolorea por QSS (a diferencia del icono del play, que la ventana reconstruye) porque QSS alcanza el texto de un botón plano.
+
+**Decisiones que el documento fijó y el código respeta:**
+- El loop se lee de `seek_slider`, NO de la fila seleccionada: la reproducción se acota a lo que el slider muestra, que es el slice del medio CARGADO. Leer la fila sería acotar un slice mientras se muestra otro.
+- El bucle es estado de UI, **nunca persistido**: es una preferencia de ESTA sesión de escucha, no una propiedad del medio, y un loop almacenado acotaría en silencio el medio de una transcripción al reabrirlo.
+- `set_loop_state(checked, available)` son las dos mitades de UN control en una llamada: separadas, las dos ventanas podrían discrepar sobre qué hace el botón.
+- Señales bloqueadas en todo mirror. El owner refleja el botón de la OTRA ventana en el suyo, así que una escritura sin bloquear rebotaría el estado y apagaría el loop en el instante en que se encendió.
+- Disponibilidad sigue al slice: un clic que pareciera no hacer nada (loop sin slice) ya no puede envenenar el siguiente slice que se dibuje.
+
+**Verificación observada:** RED `ImportError: cannot import name 'resolve_slice_position'` (los 138 preexistentes en verde); GREEN `Ran 161 tests ... OK` = 138 preexistentes + 23 nuevos (15 de frontera pura, 8 de botón/mirroring). `compileall -q app\ui`: exit 0. `git diff --check`: limpio. Los tres re-ejecutados por el orquestador con el mismo resultado.
+
+**Límite explícito de la cobertura:** `MainWindow` NO se construye en los tests. Su `__init__` crea un `MediaRepository` real (lee y escribe `items.json`) y un `Pipeline` real, así que un test que lo construyera probaría el sistema de archivos tanto como el widget. El hueco que queda —que `_on_position_changed` esté cableado a estos helpers— es real y se registra como tal para la evidencia offscreen de T5, en lugar de fingir cobertura.
+
+**Observación para T5, no tocada aquí:** al terminar el slice la fila conserva el icono de pausa, igual que tras una pausa manual, y el status dice "Fin del slice.". Es coherente con el comportamiento existente y pulsar play reinicia el slice desde el inicio (por `_enter_slice_on_play`). Cambiar la semántica de pausa excede T3.
+
+**Riesgo nativo:** RDD quedó **apagado a nivel de clone** por decisión del mantenedor antes de esta tarea (`receipt-driven development: off (decided by clone_local)`). No se intentó revisión nativa de T3 ni se fabricó JSON: el lineage de T2 sigue sin recibo y `review abandon` está prohibido por el propio STATUS. La verificación de esta tarea es la funcional de arriba, sin ceremony nativo.
+
 ## Próximo paso
-T3: reproducción acotada al slice en ambos reproductores + toggle `⟳` de loop A-B.
+T4: retirar `pipeline.py:192` (`clear_marks`), confirmar que el slice PERSISTE tras una ejecución y hacer la segunda prueba manual real.

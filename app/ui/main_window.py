@@ -34,6 +34,61 @@ from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
 from app.ui.workers import InferenceWorker
 
+# How often the boundary watchdog re-checks the player while it plays. See the
+# timer in MainWindow.__init__ for why the player's own notifications are not
+# enough on their own.
+SLICE_WATCHDOG_INTERVAL_MS = 100
+
+
+def resolve_slice_position(
+    bounds: tuple[int, int] | None, position_ms: int, loop: bool
+) -> tuple[int, bool]:
+    """Where playback goes when the player reports ``position_ms``.
+
+    ``bounds`` is the loaded media's slice in milliseconds, or ``None`` when it
+    has no slice. Returns ``(position_ms, keep_playing)``: the position to show
+    and whether playback should continue.
+
+    Three cases, and only three: without a slice nothing is bounded (that is the
+    whole file playing freely); inside the slice the reported position stands;
+    at or past the end playback jumps back to the start and either keeps going
+    with the loop on or stops with it off.
+
+    TWO boundary decisions worth naming. The end is ``end`` itself, not
+    ``end - 1``: a millisecond is the player's own resolution and shaving one off
+    would clip the tail of every slice. And "at or past" is one case, not two,
+    because the player never stops exactly on the boundary -- it reports
+    positions at its own cadence, so the first report after the end is already
+    over it. Handling only ``== end`` would let the media play on.
+
+    Pure, so the boundary arithmetic is testable without a player or a window.
+    """
+    if bounds is None or position_ms < bounds[1]:
+        return position_ms, True
+    return bounds[0], loop
+
+
+def slice_entry_position(bounds: tuple[int, int] | None, position_ms: int) -> int:
+    """Where playback STARTS when the user presses play.
+
+    Separate from :func:`resolve_slice_position` because it answers a different
+    question. That one is told where the player already is while it runs; this
+    one is asked where to begin on a deliberate user action, when the player may
+    legitimately be parked anywhere. The seek is free, so the user may have left
+    it past the end on purpose, and pressing play must still start inside the
+    slice rather than resume outside it.
+
+    The start itself counts as inside, so a slice paused at its very first
+    millisecond resumes instead of restarting; the end does not, so a player
+    parked exactly there restarts rather than sitting still.
+
+    Pure, for the same reason as :func:`resolve_slice_position`.
+    """
+    if bounds is None:
+        return position_ms
+    start, end = bounds
+    return position_ms if start <= position_ms < end else start
+
 
 class _EditableTextEdit(QPlainTextEdit):
     """Plain-text editor that marks programmatic document replacements.
@@ -106,6 +161,18 @@ class MainWindow(QMainWindow):
         # Whether the run in flight was scoped by a slice: decided once, before
         # the worker starts, so the status line can name it on completion.
         self._run_used_slice = False
+        # Whether playback loops the slice. UI state, never persisted: it is a
+        # preference about THIS viewing session, not a property of the media,
+        # and a stored loop would silently bound a run's media on the next open.
+        self._loop_enabled = False
+        # Boundary watchdog. A QMediaPlayer reports position changes at an
+        # interval it does not document, so the slice end cannot be enforced
+        # from those notifications alone without overshooting it. 100 ms is the
+        # coarse bound on how far past the end audio can leak, and it costs ten
+        # integer comparisons a second.
+        self._slice_watchdog = QTimer(self)
+        self._slice_watchdog.setInterval(SLICE_WATCHDOG_INTERVAL_MS)
+        self._slice_watchdog.timeout.connect(self._on_slice_watchdog)
         self.video_window: VideoPlayerWindow | None = None  # lazy; hidden, not deleted
 
         self._dark = load_dark_setting()
@@ -156,6 +223,18 @@ class MainWindow(QMainWindow):
         self.seek_slider = SeekSlider()
         self.time_label = QLabel("00:00 / 00:00")
         bar_layout.addWidget(self.seek_slider, stretch=1)
+        # Same position as in the video window, immediately left of the clock, so
+        # the control does not move under the user when the two views swap. It is
+        # a plain checkable button rather than a checkbox because it is a
+        # transport control, not a run option: it changes playback, not the run.
+        self.btn_loop = QPushButton("⟳")
+        self.btn_loop.setObjectName("loopButton")
+        self.btn_loop.setCheckable(True)
+        self.btn_loop.setAccessibleName("Repetir el slice en bucle")
+        self.btn_loop.setToolTip("Repetir el slice en bucle (A-B)")
+        self.btn_loop.toggled.connect(self._on_loop_toggled)
+        self.btn_loop.setEnabled(False)
+        bar_layout.addWidget(self.btn_loop)
         bar_layout.addWidget(self.time_label)
         layout.addWidget(self.playback_bar)
         self.playback_bar.setVisible(False)
@@ -524,19 +603,83 @@ class MainWindow(QMainWindow):
         window.seek_released.connect(self._on_video_seek_released)
         window.closed.connect(self._on_video_window_closed)
         window.slice_changed.connect(self._on_slice_edited)
+        window.loop_toggled.connect(self._on_loop_toggled)
         self.video_window = window
+        # The window existed before this signal was wired, so its loop button has
+        # not been mirrored yet; seed it from the owner instead of waiting for the
+        # user to click it.
+        window.set_loop_state(self._loop_enabled, self._slice_bounds_ms() is not None)
         return window
+
+    def _slice_bounds_ms(self) -> tuple[int, int] | None:
+        """The loaded media's slice in milliseconds, or ``None`` when unbounded.
+
+        Read from the slider rather than from the selected row, because playback
+        is bound to what the slider shows: the loaded media's own slice. Reading
+        the row instead would enforce one slice while showing another, which is
+        exactly the range/slice disagreement this project keeps fixing.
+
+        Zero-length is normalised to ``None`` at every layer below, so an
+        inverted or degenerate pair can never produce a position outside the
+        media.
+        """
+        if not self.seek_slider.slice():
+            return None
+        start, end = self.seek_slider.seconds()
+        return (int(start * 1000), int(end * 1000))
+
+    def _enter_slice_on_play(self) -> None:
+        """Move the player inside the slice before a deliberate play.
+
+        Called from the play paths only, never from the seek paths: seeking is
+        free, so the user may park the player past the end on purpose, and only
+        pressing play is a request to hear the slice. Without this, resuming from
+        a position outside the slice would either start where it should not or,
+        at the end itself, refuse to start at all.
+        """
+        bounds = self._slice_bounds_ms()
+        if bounds is None:
+            return
+        target = slice_entry_position(bounds, self.player.position())
+        if target != self.player.position():
+            self.player.setPosition(target)
+
+    def _on_loop_toggled(self, enabled: bool) -> None:
+        """Either loop button was clicked: adopt the state and mirror it."""
+        self._loop_enabled = bool(enabled)
+        # The signal arrives from the button that was clicked, so that one is
+        # already correct and only the OTHER window needs the write. Blocking
+        # signals inside the mirror is what stops this from bouncing.
+        self.btn_loop.blockSignals(True)
+        try:
+            self.btn_loop.setChecked(self._loop_enabled)
+        finally:
+            self.btn_loop.blockSignals(False)
+        if self.video_window is not None:
+            self.video_window.set_loop_state(
+                self._loop_enabled, self._slice_bounds_ms() is not None
+            )
+
+    def _refresh_loop_availability(self) -> None:
+        """Enable the loop control only where a slice exists for it to loop."""
+        available = self._slice_bounds_ms() is not None
+        self.btn_loop.setEnabled(available)
+        if self.video_window is not None:
+            self.video_window.set_loop_state(self._loop_enabled, available)
 
     def _toggle_play(self, path: str) -> None:
         """Play/pause ``path``; video files open the dedicated video window."""
         if self._playing_path == path:
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.player.pause()
+                self._stop_slice_watchdog()
                 self.status_label.setText("Reproducción pausada.")
                 if self._is_video(path):
                     self._sync_video_window_state(False)
             else:
+                self._enter_slice_on_play()
                 self.player.play()
+                self._start_slice_watchdog()
                 self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
                 if self._is_video(path):
                     self._sync_video_window_state(True)
@@ -554,7 +697,9 @@ class MainWindow(QMainWindow):
         else:
             self.playback_bar.setVisible(True)
             self._load_source(path)
+            self._enter_slice_on_play()
             self.player.play()
+            self._start_slice_watchdog()
             self.media_list.set_playing(path)
             self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
 
@@ -565,7 +710,9 @@ class MainWindow(QMainWindow):
         window.set_source_title(path)
         self.player.setVideoOutput(window.video_widget)
         self._load_source(path)
+        self._enter_slice_on_play()
         self.player.play()
+        self._start_slice_watchdog()
         self.media_list.set_playing(path)
         window.show()
         window.raise_()
@@ -589,10 +736,13 @@ class MainWindow(QMainWindow):
                 self.video_window.set_playing_state(False)
             return
         if checked:
+            self._enter_slice_on_play()
             self.player.play()
+            self._start_slice_watchdog()
             self.status_label.setText(f"Reproduciendo: {Path(path).stem}…")
         else:
             self.player.pause()
+            self._stop_slice_watchdog()
             self.status_label.setText("Reproducción pausada.")
         self.media_list.set_playing(path)
         self._sync_video_window_state(checked)
@@ -617,6 +767,7 @@ class MainWindow(QMainWindow):
         if self._playing_path is None:
             return
         self.player.stop()
+        self._stop_slice_watchdog()
         self.media_list.set_stopped(self._playing_path)
         self._playing_path = None
         self._seeking = False
@@ -728,13 +879,69 @@ class MainWindow(QMainWindow):
             self.playback_bar.setVisible(True)
         self._sync_time_label(self.seek_slider.value())
 
+    def _enforce_slice_boundary(self, position: int) -> tuple[int, bool]:
+        """Apply the slice boundary to ``position`` and report what happened.
+
+        Returns ``(resolved_position, moved)``. ``moved`` is False when the
+        position was already legal, which is what lets the caller skip the UI
+        work on the overwhelmingly common in-slice case.
+
+        Two callers, deliberately one body. ``_on_position_changed`` reacts to the
+        player's own notifications, and the watchdog polls on a fixed interval,
+        because those notifications arrive at an interval the player does not
+        document -- a boundary enforced only on them can overshoot the end by up
+        to that unknown gap. Sharing the body is what keeps the two paths from
+        drifting into disagreeing about what the end means.
+        """
+        target, keep_playing = resolve_slice_position(
+            self._slice_bounds_ms(), position, self._loop_enabled
+        )
+        if target == position:
+            return target, False
+        # Reached or passed the end of the slice. The order here is load bearing:
+        # rewind FIRST, then pause. Pausing first would let the player report one
+        # more position past the end, and the loop would bounce to the end again
+        # instead of settling on the start.
+        self.player.setPosition(target)
+        if not keep_playing:
+            self.player.pause()
+            self._stop_slice_watchdog()
+            self.status_label.setText("Fin del slice.")
+            self._sync_video_window_state(False)
+        return target, True
+
     def _on_position_changed(self, position: int) -> None:
         if self._seeking:
             return
-        self.seek_slider.setValue(position)
-        self._sync_time_label(position)
+        target, _moved = self._enforce_slice_boundary(position)
+        # The slider and both clocks show the resolved position, not the reported
+        # one, so the display cannot sit past the end the player already left.
+        self.seek_slider.setValue(target)
+        self._sync_time_label(target)
         if self.video_window is not None:
-            self.video_window.update_position(position)
+            self.video_window.update_position(target)
+
+    def _on_slice_watchdog(self) -> None:
+        """Poll the boundary on a fixed interval while playback runs.
+
+        The player notifies position changes at an interval it does not document,
+        so relying on ``positionChanged`` alone bounds the slice only as loosely
+        as that unknown cadence -- audible overshoot at the end of every slice.
+        Polling ``position()`` directly bounds the overshoot by this timer
+        instead, at the cost of ten cheap comparisons a second.
+        """
+        if self._playing_path is None:
+            self._stop_slice_watchdog()
+            return
+        self._enforce_slice_boundary(int(self.player.position()))
+
+    def _start_slice_watchdog(self) -> None:
+        """Arm the boundary poll. Paired with every ``player.play()``."""
+        self._slice_watchdog.start()
+
+    def _stop_slice_watchdog(self) -> None:
+        """Disarm the boundary poll. Paired with every ``player.pause()``."""
+        self._slice_watchdog.stop()
 
     def _on_seek_pressed(self) -> None:
         self._seeking = True
@@ -760,6 +967,9 @@ class MainWindow(QMainWindow):
         self.seek_slider.set_slice(value, self._duration_ms)
         if self.video_window is not None:
             self.video_window.set_slice(value, self._duration_ms)
+        # A slice appearing or disappearing changes whether the loop has
+        # anything to loop, so the control's availability follows the slice.
+        self._refresh_loop_availability()
 
     def _slice_scope_note(self) -> str:
         """Why the painted slice will NOT scope a run of the selected media.

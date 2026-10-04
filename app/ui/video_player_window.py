@@ -61,7 +61,8 @@ class VideoPlayerWindow(QWidget):
 
     The slice of the loaded media is drawn on the slider by its two handles,
     driven from here so this window shows exactly what the main window's bar
-    shows.
+    shows. The ``⟳`` button beside the clock loops that slice; it is not
+    persisted, and it is mirrored here from the main window's own button.
 
     A double-click on the video image toggles play/pause, going through the same
     ``play_toggled`` signal as the button so there is a single play/pause path
@@ -75,10 +76,11 @@ class VideoPlayerWindow(QWidget):
         closed(): the window was closed via the titlebar X.
         slice_changed(object, str): the user dragged a slice handle. The
             payload is the slider's ``slice_edited``: ``(slice, message)``.
+        loop_toggled(bool): the user turned the slice loop on or off here.
 
     Slots (called by MainWindow to sync the UI to the player state):
         set_source_title, set_duration, update_position, set_playing_state,
-        reset, set_slice, set_slice_editable.
+        reset, set_slice, set_slice_editable, set_loop_state.
     """
 
     play_toggled = Signal(bool)
@@ -86,6 +88,7 @@ class VideoPlayerWindow(QWidget):
     seek_released = Signal(int)
     closed = Signal()
     slice_changed = Signal(object, str)
+    loop_toggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,6 +139,20 @@ class VideoPlayerWindow(QWidget):
         self.time_label = QLabel("00:00 / 00:00", controls)
         self.time_label.setObjectName("videoTimeLabel")
         bar.addWidget(self.time_label)
+
+        # Beside the clock in BOTH windows, so the control does not move under
+        # the user when the two views swap: the audio bar has no play button and
+        # the video bar does, but the loop sits in the same place in each.
+        self.loop_button = QPushButton("⟳", controls)
+        self.loop_button.setObjectName("loopButton")
+        self.loop_button.setCheckable(True)
+        self.loop_button.setAccessibleName("Repetir el slice en bucle")
+        self.loop_button.setToolTip("Repetir el slice en bucle (A-B)")
+        # Signal-to-signal, like the play button: a click flips the checkable
+        # button and that re-emits. Programmatic syncs go through
+        # set_loop_state(), which blocks the button's signals.
+        self.loop_button.toggled.connect(self.loop_toggled)
+        bar.insertWidget(bar.count() - 1, self.loop_button)
 
         controls_layout.addLayout(bar)
 
@@ -205,6 +222,26 @@ class VideoPlayerWindow(QWidget):
     def set_slice_editable(self, editable: bool) -> None:
         """Allow or block handle dragging here."""
         self.slider.set_slice_editable(editable)
+
+    def set_loop_state(self, checked: bool, available: bool) -> None:
+        """Mirror the owner's loop control onto this window's button.
+
+        Both halves of one UI state in one call, because they are one control:
+        ``checked`` is whether the loop is on, and ``available`` is whether there
+        is a slice for it to loop. Splitting them would let the two windows
+        disagree about what the button even does.
+
+        Signals are blocked for the same reason :meth:`set_playing_state` blocks
+        them: the owner mirrors this window's button INTO its own, so an
+        unblocked write here would emit ``loop_toggled`` back at the owner and
+        switch the loop off again the instant the user switched it on.
+        """
+        self.loop_button.blockSignals(True)
+        try:
+            self.loop_button.setChecked(bool(checked))
+            self.loop_button.setEnabled(bool(available))
+        finally:
+            self.loop_button.blockSignals(False)
 
     # -- internals ------------------------------------------------------------
     def toggle_play_from_video(self) -> None:
