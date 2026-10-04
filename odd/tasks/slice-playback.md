@@ -84,5 +84,20 @@ Los 5 medios reales tienen `marks: null`, así que el archivo actual **no** disp
 - Delivery: por decidir. Forecast ≈ 1000–1200 líneas authored, **por encima del presupuesto de ~400**. Sin remoto GitHub, los PRs encadenados no son ejecutables; el precedente (`in-out-marks`) fue `exception-ok` con `size:exception` aprobada por el mantenedor.
 - Estimación por tarea: T1 ≈ 180, T2 ≈ 350, T3 ≈ 250, T4 ≈ 120, T5 ≈ 250.
 
+## Registro por tarea
+
+### T1 — modelo y persistencia (cerrada, `d224a0a`)
+661 líneas authored en 5 rutas (forecast: 180 — el test pesa 276 líneas y el doble de lo previsto).
+
+**La mina se reprodujo antes de arreglarla.** Con `load()` sin traducir la clave legacy, sobre un `items.json` de 3 entradas todas con `marks`: **0 entradas cargadas**, `items.json.corrupt` escrito, y `items.json` dejado conteniendo `[]`. Pérdida total y silenciosa, exactamente como predice "MINA CONFIRMADA".
+
+**Decisiones del escritor que el documento no pedía:** rechazo de booleanos (`float(False) == 0.0` haría de `[false, true]` un slice de 0–1 s que nadie puso); guarda explícita de `NaN`/`inf` (un `end` NaN sobrevive a toda comparación de orden y llegaría a los motores como un rango que no pueden decodificar); `load()` construye entrada por entrada con su propia guarda, así una fila mala cuesta esa fila y no la biblioteca; y una fila descartada **igual guarda sus bytes crudos**, porque `__init__` llama `save()` justo después de `load()` y esa copia es la única que queda.
+
+**Verificación observada:** RED `ImportError: cannot import name 'normalize_slice'`; GREEN `79 passed, 26 subtests` — 41 preexistentes de `tests/asr/` intactos, 38 nuevos. `.venv\Scripts\python.exe -m unittest discover -s tests`: `Ran 79 tests ... OK`. `compileall app`: exit 0. `git diff --check`: limpio. Re-ejecutado por el orquestador, los cuatro con el mismo resultado.
+
+**Riesgo nativo:** `medium` por `executable_change` en `app/core.models.py`, `review_due: true` por `slice_budget_reached`. El mantenedor **declinó la revisión de este candidato** (`consent: declined_this_candidate`, sin autoridad ni recibo creado). El rechazo es por candidato, no un apagado global.
+
+**Rama medio rota a propósito:** `app/ui/seek_slider.py:45` importa `normalize_marks` (ya no existe) y `app/services/pipeline.py:192` llama a `clear_marks` (borrado en T1). T2 y T4 los retiran. La reproducción funciona desde T2; la transcripción no hasta T4.
+
 ## Próximo paso
-T1 en una rama de feature desde `main` (`7da400b`).
+T2: handles en el slider.
