@@ -33,8 +33,17 @@ FRAME_SECONDS = 0.020
 MIN_GAP_SECONDS = 2.0
 
 #: How far above the measured noise floor a frame has to sit to count as speech.
-#: 6 dB is the point where a frame is audibly carrying signal rather than hiss.
-SPEECH_MARGIN_DB = 6.0
+#: Calibrated against the reference MKV, where 6 dB produced 744 "speech" regions
+#: averaging 0.4 s: the music bed was being counted as voice, and the coverage
+#: metric was then reporting the detector's noise as if it were dropped text.
+SPEECH_MARGIN_DB = 12.0
+
+#: Intra-sentence pauses. Runs of speech closer together than this are one region,
+#: because nobody says a sentence without breathing.
+REGION_MERGE_SECONDS = 0.40
+
+#: A blip is not a word. Runs shorter than this are dropped.
+REGION_MIN_SECONDS = 0.20
 
 #: Fraction of the frames taken as the quietest ones when estimating the noise
 #: floor. Music beds are loud enough that a 10th percentile still lands inside
@@ -122,23 +131,40 @@ def speech_mask(
 
 
 def speech_regions(
-    mask: np.ndarray, sample_rate: int = 16000
+    mask: np.ndarray,
+    merge_seconds: float = REGION_MERGE_SECONDS,
+    min_seconds: float = REGION_MIN_SECONDS,
 ) -> list[tuple[float, float]]:
-    """Contiguous runs of speech as ``(start, end)`` seconds."""
-    regions: list[tuple[float, float]] = []
+    """Contiguous runs of speech as ``(start, end)`` seconds.
+
+    Merges runs closer than ``merge_seconds`` and drops runs shorter than
+    ``min_seconds``, because an energy threshold on a music bed produces a rash of
+    sub-second blips. Left unmerged they inflate the region count, and every
+    downstream metric inherits the error.
+
+    The frame length is fixed by ``FRAME_SECONDS``, so there is no sample rate here
+    to be wrong about.
+    """
+    raw: list[tuple[float, float]] = []
     if mask.size == 0:
-        return regions
-    frame_len = FRAME_SECONDS
+        return raw
     start: int | None = None
     for index, value in enumerate(mask):
         if value and start is None:
             start = index
         elif not value and start is not None:
-            regions.append((start * frame_len, index * frame_len))
+            raw.append((start * FRAME_SECONDS, index * FRAME_SECONDS))
             start = None
     if start is not None:
-        regions.append((start * frame_len, mask.size * frame_len))
-    return regions
+        raw.append((start * FRAME_SECONDS, mask.size * FRAME_SECONDS))
+
+    merged: list[tuple[float, float]] = []
+    for region_start, region_end in raw:
+        if merged and region_start - merged[-1][1] < merge_seconds:
+            merged[-1] = (merged[-1][0], region_end)
+        else:
+            merged.append((region_start, region_end))
+    return [r for r in merged if r[1] - r[0] >= min_seconds]
 
 
 def band_pass_fft(
@@ -275,7 +301,6 @@ def coverage(
 def silence_and_repetition(
     segments: list[Segment],
     regions: list[tuple[float, float]],
-    sample_rate: int = 16000,
 ) -> dict:
     """Text emitted where there is no speech, and repeated text.
 
@@ -285,6 +310,11 @@ def silence_and_repetition(
     decoder emits one token at a time and has no way to say nothing, so under a
     music bed it tends to produce text. A model that decides per step, or that is
     not autoregressive at all, is not obliged to.
+
+    ``segments_fully_in_silence`` is reported next to the aggregate on purpose.
+    Prose that straddles a breath is normal and a large percentage alone would be
+    misread as hallucination; a whole segment sitting on silence is the thing worth
+    knowing about. They must not be summarised into one number.
 
     ``repeat_ngram_ratio`` catches the runaway loop across windows, which is the
     failure ``condition_on_previous_text=True`` invites.
@@ -390,19 +420,25 @@ def analyse(
     frames = frame_dbfs(waveform, sample_rate)
     floor = noise_floor_db(frames)
     mask = speech_mask(frames, floor)
-    regions = speech_regions(mask, sample_rate)
+    regions = speech_regions(mask)
     return Report(
         families={
             "signal": {
                 "duration_s": total_duration,
                 "frames": frames.size,
                 "noise_floor_dbfs": floor,
+                "speech_margin_db": SPEECH_MARGIN_DB,
                 "speech_frac": float(mask.mean()) if mask.size else 0.0,
+                # Published so the detector can be checked rather than trusted.
+                # The reference file first reported 744 regions averaging 0.4 s,
+                # which is a music bed misread as a stutter.
+                "speech_regions": len(regions),
+                "speech_region_mean_s": (
+                    sum(e - s for s, e in regions) / len(regions) if regions else 0.0
+                ),
             },
             "M1_phrase_integrity": phrase_integrity(segments),
             "M2_coverage": coverage(segments, total_duration, mask, regions),
-            "M3_silence_and_repetition": silence_and_repetition(
-                segments, regions, sample_rate
-            ),
+            "M3_silence_and_repetition": silence_and_repetition(segments, regions),
         }
     )

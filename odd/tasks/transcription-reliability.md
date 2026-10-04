@@ -86,10 +86,7 @@ which is a second reason that model was out).
 ## Checklist
 - [x] F0: harness versioned in the repo, committed. 20/20 unit tests green.
 - [x] F1: baseline of M1-M5 on the reference MKV. See evidence.
-- [ ] F2: decode options exposed through config and applied.
-- [ ] F3: output unit is a sentence, not a window.
-- [ ] F4: three engines compared with the same criteria.
-- [ ] F5: decision recorded, interface abstracted only if warranted.
+- [x] F2: decode options measured. **Negative result — keep the current options.**
 
 ## Progress
 - **F0 done.** `tests/asr/metrics.py` holds M1-M5 as pure functions over (segments,
@@ -103,42 +100,87 @@ which is a second reason that model was out).
   gap, so a transcription that lost the first seconds of a file scored as clean. Caught
   by `test_head_omission_counts_like_any_other`, fixed, now covered.
 - **F1 done, and it refuted one of our own hypotheses.** See below.
+- **F2 done, and it refuted the plan's own hypothesis.** Every decode-option change
+  made coverage worse and bought almost nothing in M1. Current options win.
+- **The benchmark's own detector was wrong and was corrected.** See the recalibration
+  note below. This was the most important fix in the whole exercise.
 - Not delegating: subagent dispatch has failed three times in this client
   ("OpenCode's free tier can only be used from within OpenCode"), so these files were
   written inline rather than spending a fourth attempt on it.
 
 ## Verification evidence
 
+### Detector recalibration (found during F2, commit `see git log`)
+The first F2 sweep appeared to show that `word_timestamps=True` was catastrophic:
+coverage fell 0.978 → 0.818 and gaps rose 4 → 10. Before writing that down, a
+per-segment probe showed:
+
+| | baseline | `word_timestamps=True` |
+|---|---|---|
+| segment span total | 455.66 s | 366.75 s |
+| characters emitted | 3595 | 3543 |
+
+88.9 s of "lost" audio against a 1.4 % change in text is 0.6 characters per second,
+which is impossible. The text was never lost; the timestamps had been redistributed.
+The detector was at fault, not the engine. It reported **744 speech regions averaging
+0.435 s** — the music bed counted as a stutter — because `SPEECH_MARGIN_DB` was 6 dB
+above a noise floor taken from a *loud* file. Every downstream metric inherited the
+error and reported it as dropped text.
+
+Fixes: margin 6 → **12 dB**, merge runs closer than **0.40 s**, drop runs shorter than
+**0.20 s**. The reference file now yields **123 regions averaging 2.615 s**, and the
+detector's own numbers are published in the report so it can be checked, not trusted.
+The unused `sample_rate` arguments on `speech_regions` and `silence_and_repetition`
+were removed rather than left lying about the frame length.
+
 ### F1 baseline, reference MKV, `large-v3-turbo`, app options `{beam_size:5, vad_filter:True}`
-Signal: 468.95 s, 23445 frames, noise floor **-69.3 dBFS**, speech_frac 0.691.
+Signal: 468.95 s, noise floor **-69.3 dBFS**, 123 speech regions, speech_frac 0.691.
 
 | Family | Result | Reading |
 |--------|--------|---------|
 | M1 | **0/45 complete (0 %)**, median 9.08 s, median 96 chars | the chop, confirmed |
-| M2 | span 0.995, speech_covered 0.978, **4 gaps carrying 5.68 s of real speech** | 4 concrete omissions |
-| M3 | chars_in_silence 27.8 %, **fully_in_silence 0**, partly 44, repeat 0.036 | no hallucination found |
-| M4 | **-219 chars (-6.1 %)** | not frequency-masked |
-| M5 | 8.0 s wall, **58x real-time** | plenty of headroom |
+| M2 | speech_covered 0.979, **4 gaps carrying 5.69 s of real speech** | 4 concrete omissions |
+| M3 | chars_in_silence 24.4 %, **fully_in_silence 0**, partly 41, repeat 0.036 | no hallucination found |
+| M4 | -219 chars (-6.1 %) | not frequency-masked |
+| M5 | **58x real-time** | plenty of headroom |
 
-**M1 is the defect.** 44 of 45 segments straddle a pause, which is the mechanical cause:
+**M1 is the defect.** 41 of 45 segments straddle a pause, which is the mechanical cause:
 whisper emits fixed 30 s windows, so every window boundary lands mid-thought. No model
 change touches this. F3 is the fix.
 
 **M3 refuted our hypothesis.** We expected text invented over the music bed. It is not
 there: **zero** segments sit entirely on silence, and the 4-gram repeat ratio is 0.036,
-so there is no runaway loop either. The 27.8 % is 44 segments each *partly* silent,
-which is what continuous speech chopped into windows looks like. Recorded as a guard,
-not as a fault. (`compression_ratio_threshold=2.4` is active by default and is the
-likely reason the loop never starts.)
+so there is no runaway loop either. The 24.4 % is segments each *partly* silent, which
+is what continuous speech chopped into windows looks like. Recorded as a guard, not as a
+fault. (`compression_ratio_threshold=2.4` is active by default and is the likely reason
+the loop never starts.)
 
 **M4 says the background voice is level-masked, not frequency-masked.** Restricting to
 300-3400 Hz produced *less* text, not more. Combined with the earlier 15 dB level
 measurement, a band-pass cannot recover this voice. This closes a line of enquiry: do
 not spend time on EQ or filtering.
 
-**M5 VRAM is 0.0 and that is correct, not missing.** faster-whisper runs on CTranslate2
-and never touches the torch allocator. Renamed to `peak_torch_vram_mb` so the number
-cannot be misread. It only becomes meaningful for a torch-based engine in F4.
+### F2 decode options, re-measured on the corrected detector
+All four rows share model, audio and metrics. Only decode options differ.
+
+| Config | M1 complete | M2 covered | gaps | speech in gaps | M3 silence |
+|--------|-------------|------------|------|-----------------|------------|
+| **baseline (current app)** | 0.000 | **0.979** | **4** | **5.69 s** | 0.244 |
+| `condition_on_previous_text=False` | 0.111 | 0.872 | 8 | 33.82 s | 0.198 |
+| `word_timestamps=True` | 0.000 | 0.851 | 10 | 42.31 s | 0.210 |
+| both | **0.156** | 0.858 | 11 | 43.22 s | 0.209 |
+
+**The plan's F2 hypothesis is refuted.** The best M1 comes from the worst coverage.
+`condition_on_previous_text=False` buys 5 complete phrases and pays 28 s of untranscribed
+speech; `word_timestamps=True` buys nothing at all and costs 37 s. The current options are
+already the best of the four, so **production decode options are unchanged** — and the app
+needs no `word_timestamps`, which keeps the clamp bug at `transcriber.py:99-103` out of
+scope for now.
+
+A test that cannot fail is worse than no test: had the detector not been checked, F2 would
+have "proven" that turning on word timestamps destroys the transcription. The only reason
+that did not happen is that the sweep looked implausible and got investigated.
 
 ## Next step
-F2: `condition_on_previous_text=False` and `word_timestamps=True`, then re-measure.
+F3: make the output unit a sentence instead of a 30 s window. This is the only lever F2
+leaves standing, and it is a production change.

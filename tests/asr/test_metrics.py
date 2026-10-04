@@ -85,7 +85,7 @@ class TestCoverage(unittest.TestCase):
         self.wave = loud_gap_file()
         frames = frame_dbfs(self.wave, SR)
         self.mask = speech_mask(frames, noise_floor_db(frames))
-        self.regions = speech_regions(self.mask, SR)
+        self.regions = speech_regions(self.mask)
 
     def test_finds_the_loud_spans(self):
         self.assertGreaterEqual(len(self.regions), 2)
