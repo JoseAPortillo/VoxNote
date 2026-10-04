@@ -84,9 +84,60 @@ signature rather than documentation:
 which is a second reason that model was out).
 
 ## Checklist
-- [x] F0: harness versioned in the repo, committed. 20/20 unit tests green.
+- [x] F0: harness versioned in the repo, committed. 41/41 unit tests green.
 - [x] F1: baseline of M1-M5 on the reference MKV. See evidence.
 - [x] F2: decode options measured. **Negative result — keep the current options.**
+- [x] F3: sentence grouper built and measured. **Mechanically sound, but cannot fix
+  M1 — the audio yields no punctuation. Not wired into production.**
+- [x] F4: `large-v3` compared against turbo. **Turbo wins on coverage and speed.**
+- [ ] F5: decision recorded; interface abstracted only if warranted.
+
+## The finding that reframes everything (F3)
+Reading the actual output, which three phases of aggregates had failed to do:
+**the reference transcript contains 0 periods, 0 commas, 0 question marks and 0
+exclamation marks across 3543 characters.** It is run-on text. Whisper never places a
+sentence boundary in it.
+
+So the F1 conclusion was **wrong**. The chop is not 30 s window boundaries cutting
+sentences; there are no sentences in the output to cut. Every framing that followed from
+"the window lands mid-thought" was reasoning about a cause that does not exist.
+
+Confirmed across engines and levers, on the reference MKV:
+
+| Lever | M1 complete | notes |
+|-------|-------------|-------|
+| turbo, current options | 0.000 | 45 units |
+| turbo, `word_timestamps` | 0.000 | 44 units |
+| turbo, `condition_on_previous_text=False` | 0.111 | 45 units, from the F2 sweep |
+| turbo, `initial_prompt` asking for punctuation | 0.000 / 0.056 | prompt does not restore it |
+| turbo, sentence grouping at 1.2 s pauses | **0.000** | 39 units, chars preserved |
+| **large-v3** (full model) | **0.000** | 55 units, 3813 chars |
+
+The full model punctuates nothing either. **M1 as defined is unachievable on this audio
+with whisper**, and no decode option, prompt, grouping or model change reaches it.
+Reporting it as fixable without this evidence would have spent the whole exercise on a
+target that does not exist.
+
+### What the grouper is actually worth
+`app/services/sentences.py` works: 738 timed words → 39 units, 3548 chars against a
+3543-char window baseline, every unit closed at a pause rather than at a window edge,
+none overlapping, median 73 chars against 96. Text is preserved exactly. Breaks become
+meaningful instead of arbitrary. That is a real gain in readability, and it is **not**
+phrase completeness. Keeping those two apart is the whole point of this phase.
+
+### Not wired into production, on purpose
+Two reasons, both measured rather than assumed:
+- The gain it delivers is not the gain F3 was chartered to deliver.
+- `Pipeline` translates each segment independently and already documents that this
+  "loses cross-sentence context". Shorter units make that worse, and nothing in this
+  repository measures translation quality yet. Shipping a change that might degrade the
+  translated pane to improve readability is a trade, not a fix.
+
+### F4: large-v3 loses to turbo on both counts
+`large-v3` reaches 0.899 speech coverage with **28.36 s** of speech in gaps, against
+turbo's 0.979 and 5.69 s, and runs at 5.4x real-time against turbo's 58x. More
+characters (3813 vs 3543) is not more content; it is more invention on a bed this hard.
+Turbo stays, and the app needs no model change.
 
 ## Progress
 - **F0 done.** `tests/asr/metrics.py` holds M1-M5 as pure functions over (segments,
@@ -102,15 +153,21 @@ which is a second reason that model was out).
 - **F1 done, and it refuted one of our own hypotheses.** See below.
 - **F2 done, and it refuted the plan's own hypothesis.** Every decode-option change
   made coverage worse and bought almost nothing in M1. Current options win.
-- **The benchmark's own detector was wrong and was corrected.** See the recalibration
-  note below. This was the most important fix in the whole exercise.
+- **The benchmark's own detector was wrong and was corrected.** The first F2 sweep looked
+  like a catastrophic result until a per-segment probe showed it was arithmetic nonsense.
+  See the recalibration note below; this was the most important fix in the whole exercise.
+- **F3 built the sentence grouper and disproved the phase's own premise.** Reading the
+  transcript for the first time showed zero punctuation in 3543 characters, so there are
+  no sentences to find. The grouper is sound and is kept, but it improves readability, not
+  phrase completeness, and it is not wired into production.
+- **F4 compared engines and turbo won.** large-v3 is worse on coverage and 10x slower.
 - Not delegating: subagent dispatch has failed three times in this client
   ("OpenCode's free tier can only be used from within OpenCode"), so these files were
   written inline rather than spending a fourth attempt on it.
 
 ## Verification evidence
 
-### Detector recalibration (found during F2, commit `see git log`)
+### Detector recalibration (found during F2, commit 356dc16)
 The first F2 sweep appeared to show that `word_timestamps=True` was catastrophic:
 coverage fell 0.978 → 0.818 and gaps rose 4 → 10. Before writing that down, a
 per-segment probe showed:
@@ -138,7 +195,7 @@ Signal: 468.95 s, noise floor **-69.3 dBFS**, 123 speech regions, speech_frac 0.
 
 | Family | Result | Reading |
 |--------|--------|---------|
-| M1 | **0/45 complete (0 %)**, median 9.08 s, median 96 chars | the chop, confirmed |
+| M1 | **0/45 complete (0 %)**, median 9.08 s, median 96 chars | no punctuation in the output at all |
 | M2 | speech_covered 0.979, **4 gaps carrying 5.69 s of real speech** | 4 concrete omissions |
 | M3 | chars_in_silence 24.4 %, **fully_in_silence 0**, partly 41, repeat 0.036 | no hallucination found |
 | M4 | -219 chars (-6.1 %) | not frequency-masked |
@@ -182,5 +239,8 @@ have "proven" that turning on word timestamps destroys the transcription. The on
 that did not happen is that the sweep looked implausible and got investigated.
 
 ## Next step
-F3: make the output unit a sentence instead of a 30 s window. This is the only lever F2
-leaves standing, and it is a production change.
+Blocked on a product decision, not on missing evidence. The evidence says the output has
+no sentences to find. Options: accept the run-on text as inherent to this audio; apply the
+grouper plus capitalisation so units at least read as sentences; or attack the audio
+itself, since a quiet voice under music is the one thing all of this agrees is the root
+condition. Nothing is blocked on engineering.

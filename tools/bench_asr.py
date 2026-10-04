@@ -42,6 +42,12 @@ from app.core.config import (  # noqa: E402
     WHISPER_MODEL,
 )
 from app.services.clipper import SAMPLE_RATE, decode_range, duration  # noqa: E402
+from app.services.sentences import (  # noqa: E402
+    SENTENCE_MAX_CHARS,
+    SENTENCE_MAX_GAP,
+    Word,
+    group_into_sentences,
+)
 from tests.asr.metrics import (  # noqa: E402
     Report,
     Segment,
@@ -96,6 +102,37 @@ def run(model, waveform: np.ndarray, options: dict) -> tuple[list[Segment], floa
     return segments, time.perf_counter() - started
 
 
+def as_sentences(
+    model, waveform: np.ndarray, options: dict, gap: float, chars: int
+) -> tuple[list[Segment], list[Segment], float]:
+    """Transcribe once, then regroup the words into sentence-sized units.
+
+    Word timestamps are forced on because there is no way to place a sentence
+    boundary in time without them. Returns both the window units and the sentence
+    units from a single transcription, so a sweep compares like with like instead
+    of against a stored number from another run.
+    """
+    started = time.perf_counter()
+    # Materialise the generator. faster-whisper yields lazily, so reading it twice
+    # would silently give an empty second pass and a result of zero units.
+    raw = list(model.transcribe(waveform, **dict(options, word_timestamps=True))[0])
+    elapsed = time.perf_counter() - started
+    windows = [
+        Segment(start=float(s.start), end=float(s.end), text=s.text or "")
+        for s in raw
+    ]
+    words = [
+        Word(start=float(w.start), end=float(w.end), text=w.word or "")
+        for s in raw
+        for w in (list(getattr(s, "words", None) or []))
+    ]
+    sentences = [
+        Segment(start=s.start, end=s.end, text=s.text)
+        for s in group_into_sentences(words, max_chars=chars, max_gap=gap)
+    ]
+    return windows, sentences, elapsed
+
+
 def peak_vram_mb() -> float:
     """Peak CUDA allocation for this process, or 0.0 when running on CPU."""
     try:
@@ -126,6 +163,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also transcribe the 300-3400 Hz vocal band (M4 second instrument)",
     )
+    parser.add_argument(
+        "--sentences",
+        action="store_true",
+        help="group words into sentence-sized units (F3 candidate)",
+    )
+    parser.add_argument(
+        "--gap",
+        type=float,
+        default=SENTENCE_MAX_GAP,
+        help=f"pause that closes a sentence, seconds (default {SENTENCE_MAX_GAP})",
+    )
+    parser.add_argument(
+        "--chars",
+        type=int,
+        default=SENTENCE_MAX_CHARS,
+        help=f"length valve for a sentence (default {SENTENCE_MAX_CHARS})",
+    )
     parser.add_argument("--json", metavar="PATH", help="write the report as JSON")
     args = parser.parse_args(argv)
 
@@ -152,23 +206,54 @@ def main(argv: list[str] | None = None) -> int:
     model = WhisperModel(
         args.model, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE
     )
-    segments, wall = run(model, waveform, options)
-    report = analyse(segments, waveform, total, SAMPLE_RATE)
-    report.families["M5_cost"] = cost(wall, total, peak_vram_mb())
+
+    if args.sentences:
+        # One transcription, scored twice: the window units whisper produced and the
+        # sentence units built from the same words. Comparing across runs would
+        # confound the grouping with decoder nondeterminism.
+        windows, sentences, wall = as_sentences(
+            model, waveform, options, args.gap, args.chars
+        )
+        report = analyse(sentences, waveform, total, SAMPLE_RATE)
+        report.families["M5_cost"] = cost(wall, total, peak_vram_mb())
+        report.families["grouping"] = {
+            "max_gap_s": args.gap,
+            "max_chars": args.chars,
+            "window_units": len(windows),
+            "sentence_units": len(sentences),
+        }
+        baseline = analyse(windows, waveform, total, SAMPLE_RATE)
+        report.families["window_baseline"] = {
+            "complete_frac": baseline.families["M1_phrase_integrity"]["complete_frac"],
+            "speech_covered_frac": baseline.families["M2_coverage"]["speech_covered_frac"],
+            "gaps_with_signal": baseline.families["M2_coverage"]["gaps_with_signal"],
+            "chars_total": baseline.families["M1_phrase_integrity"]["chars_total"],
+        }
+        report.families["context"] = {
+            "label": label,
+            "model": args.model,
+            "media": media.name,
+            "options": {k: str(v) for k, v in options.items()},
+            "units": "sentences",
+        }
+    else:
+        segments, wall = run(model, waveform, options)
+        report = analyse(segments, waveform, total, SAMPLE_RATE)
+        report.families["M5_cost"] = cost(wall, total, peak_vram_mb())
+        report.families["context"] = {
+            "label": label,
+            "model": args.model,
+            "media": media.name,
+            "options": {k: str(v) for k, v in options.items()},
+        }
 
     if args.band:
         narrow = band_pass_fft(waveform, sample_rate=SAMPLE_RATE)
         band_segments, _band_wall = run(model, narrow, options)
         report.families["M4_background_recovery"] = background_recovery(
-            segments, band_segments
+            segments if not args.sentences else windows, band_segments
         )
 
-    report.families["context"] = {
-        "label": label,
-        "model": args.model,
-        "media": media.name,
-        "options": {k: str(v) for k, v in options.items()},
-    }
     print(report.as_text())
 
     if args.json:
