@@ -20,6 +20,7 @@ if (
 
 from PySide6.QtWidgets import QApplication
 
+from app.ui.app_icon import apply_app_icon
 from app.ui.main_window import MainWindow
 from app.ui.theme import apply_theme, load_dark_setting
 
@@ -28,6 +29,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Transcript")
     app.setOrganizationName("Transcript")
+    apply_app_icon(app)
     apply_theme(app, load_dark_setting())
     window = MainWindow()
     window.show()

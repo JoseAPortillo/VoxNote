@@ -1,3 +1,5 @@
+<img src="app/assets/logo-256.png" alt="Transcript logo" width="128" align="right">
+
 # Transcript — Local audio/video transcription & translation
 
 A desktop app (Python + PySide6) that transcribes and translates audio/video

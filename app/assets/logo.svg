@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Transcript">
+  <title>Transcript</title>
+  <defs>
+    <!-- Both stops are palette tokens (LIGHT accent / accent_pressed family), so
+         the mark cannot drift away from the UI's accent. -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6fed"/>
+      <stop offset="1" stop-color="#1d4fb8"/>
+    </linearGradient>
+  </defs>
+  <!-- Tile: 24..488 with a 112 corner radius, leaving 48px of breathing room so
+       the mark never looks cramped at 16px. -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#tile)"/>
+  <g fill="#ffffff">
+    <!-- Waveform: five bars, widest in the middle, baseline on the vertical
+         centre (y=256). Thick on purpose, because a taskbar icon is 16px and
+         thin bars alias into mush there. -->
+    <rect x="122" y="184" width="36" height="72"  rx="18"/>
+    <rect x="180" y="128" width="36" height="128" rx="18"/>
+    <rect x="238" y="72"  width="36" height="184" rx="18"/>
+    <rect x="296" y="128" width="36" height="128" rx="18"/>
+    <rect x="354" y="184" width="36" height="72"  rx="18"/>
+    <!-- The transcript it becomes: three lines of text, ragged at the end. -->
+    <rect x="131" y="308" width="250" height="28" rx="14"/>
+    <rect x="131" y="360" width="250" height="28" rx="14"/>
+    <rect x="131" y="412" width="164" height="28" rx="14"/>
+  </g>
+</svg>

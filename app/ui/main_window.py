@@ -28,6 +28,7 @@ from app.services.exporter import (
 from app.services.pipeline import Pipeline
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
+from app.ui.app_icon import header_logo_label
 from app.ui.media_list import MediaList
 from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
@@ -213,6 +214,13 @@ class MainWindow(QMainWindow):
 
         header = QHBoxLayout()
         header.setSpacing(8)
+        # The mark sits left of the hint and takes a fixed 34px, so the hint has
+        # that much less room to lay itself out. It stays the widget Qt shrinks
+        # first (a non-wrapping QLabel reports a small minimumSizeHint), which is
+        # why it is added before the stretch below rather than after.
+        logo = header_logo_label()
+        if logo is not None:
+            header.addWidget(logo)
         hint = QLabel(
             "Arrastra vídeos o audios aquí · doble clic en el nombre: alias · "
             "clic en la anotación: editarla · edita los paneles libremente · "
