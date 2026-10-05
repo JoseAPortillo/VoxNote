@@ -20,12 +20,15 @@ if (
 
 from PySide6.QtWidgets import QApplication
 
-from app.ui.app_icon import apply_app_icon
+from app.ui.app_icon import apply_app_icon, apply_app_user_model_id
 from app.ui.main_window import MainWindow
 from app.ui.theme import apply_theme, load_dark_setting
 
 
 def main() -> int:
+    # Before the QApplication exists: the shell files the taskbar entry when the
+    # first window appears, and it resolves that entry from the app identity.
+    apply_app_user_model_id()
     app = QApplication(sys.argv)
     app.setApplicationName("Transcript")
     app.setOrganizationName("Transcript")

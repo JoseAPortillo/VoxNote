@@ -11,6 +11,7 @@ working fallback.
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QLabel
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+
+# Windows caps an AppUserModelID at 128 characters and allows only letters,
+# digits, dots and dashes.
+APP_USER_MODEL_ID = "Transcript.Desktop"
 
 # Resolved from __file__, never from the CWD: Transcript.bat happens to cd into
 # the project root, but `python -m app.main` has to work from anywhere.
@@ -38,6 +43,32 @@ def _pick() -> Path | None:
         [WINDOWS_ICON, PNG_ICON] if sys.platform == "win32" else [PNG_ICON, WINDOWS_ICON]
     )
     return next((p for p in order if p.is_file()), None)
+
+
+def apply_app_user_model_id() -> bool:
+    """Give this process its own Windows app identity. Returns True on success.
+
+    Without an explicit AppUserModelID, Windows derives one from the executable
+    path. Running under ``pythonw.exe`` therefore makes the shell treat the app
+    as "python": the taskbar button, the Alt+Tab entry and the task grouping all
+    borrow pythonw's embedded logo, and no amount of ``setWindowIcon`` changes
+    that, because those are resolved from the app identity rather than from the
+    window. Measured: the window hands Windows a valid ``WM_GETICON`` handle and
+    the taskbar still showed the Python logo.
+
+    Must run before the first window exists, or the shell has already filed the
+    taskbar entry under the old identity.
+    """
+    try:
+        shell32 = ctypes.WinDLL("shell32")
+        set_id = shell32.SetCurrentProcessExplicitAppUserModelID
+        set_id.argtypes = [ctypes.c_wchar_p]
+        set_id.restype = ctypes.c_long
+        return set_id(APP_USER_MODEL_ID) == 0
+    except (OSError, AttributeError, ValueError):
+        # Branding is not worth refusing to start over: on a shell without this
+        # API the app simply keeps the old taskbar behaviour.
+        return False
 
 
 def app_icon() -> QIcon:
