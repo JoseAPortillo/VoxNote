@@ -30,8 +30,8 @@ def main() -> int:
     # first window appears, and it resolves that entry from the app identity.
     apply_app_user_model_id()
     app = QApplication(sys.argv)
-    app.setApplicationName("Transcript")
-    app.setOrganizationName("Transcript")
+    app.setApplicationName("VoxNote")
+    app.setOrganizationName("VoxNote")
     apply_app_icon(app)
     apply_theme(app, load_dark_setting())
     window = MainWindow()

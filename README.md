@@ -1,13 +1,13 @@
-<img src="app/assets/logo-256.png" alt="Transcript logo" width="128" align="right">
+<img src="app/assets/logo-256.png" alt="VoxNote logo" width="128" align="right">
 
-# Transcript — Local audio/video transcription & translation
+# VoxNote — Local audio & video notes
 
-A desktop app (Python + PySide6) that transcribes and translates audio/video
-files on the local machine. Transcription, translation, and optional speaker
-diarization run locally, and media files are never uploaded. It uses
-faster-whisper for transcription, Argos Translate for translation, and
-optional PyAnnote for speaker diarization. Validated on Windows with Python
-3.14 and NVIDIA CUDA.
+A desktop app (Python + PySide6) that keeps notes for audio and video files on
+the local machine. Transcription, translation, and optional speaker diarization
+are the tools that help you write those notes, and they all run locally: media
+files are never uploaded. It uses faster-whisper for transcription, Argos
+Translate for translation, and optional PyAnnote for speaker diarization.
+Validated on Windows with Python 3.14 and NVIDIA CUDA.
 
 ## Quick path
 
@@ -31,7 +31,7 @@ optional PyAnnote for speaker diarization. Validated on Windows with Python
    ```bash
    python -m app.main
    ```
-   On Windows you can also double-click `Transcript.bat` (opens without a console window).
+   On Windows you can also double-click `VoxNote.bat` (opens without a console window).
 
 ## Features
 

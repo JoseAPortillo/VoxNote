@@ -1,0 +1,3 @@
+# Batch files must keep CRLF: Windows cmd.exe is not reliable with bare LF, and a
+# cloned launcher that breaks on its first line is a broken first impression.
+*.bat text eol=crlf

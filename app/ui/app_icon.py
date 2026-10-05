@@ -22,9 +22,9 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
 # Windows caps an AppUserModelID at 128 characters and allows only letters,
 # digits, dots and dashes.
-APP_USER_MODEL_ID = "Transcript.Desktop"
+APP_USER_MODEL_ID = "VoxNote.Desktop"
 
-# Resolved from __file__, never from the CWD: Transcript.bat happens to cd into
+# Resolved from __file__, never from the CWD: VoxNote.bat happens to cd into
 # the project root, but `python -m app.main` has to work from anywhere.
 WINDOWS_ICON = ASSETS / "logo.ico"
 PNG_ICON = ASSETS / "logo-256.png"
@@ -103,6 +103,6 @@ def header_logo_label() -> QLabel | None:
     label.setPixmap(icon.pixmap(HEADER_LOGO_PX, HEADER_LOGO_PX))
     # The mark is decorative: the window title already names the app, so an
     # empty accessible name keeps it out of the screen reader's way instead of
-    # announcing a duplicate "Transcript".
+    # announcing a duplicate app name.
     label.setAccessibleName("")
     return label

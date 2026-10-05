@@ -1,5 +1,5 @@
 @echo off
-rem Transcript launcher - opens the app without a console window.
+rem VoxNote launcher - opens the app without a console window.
 rem Uses the project virtualenv (pythonw.exe) and the project root as cwd.
 setlocal
 cd /d "%~dp0"

@@ -156,7 +156,7 @@ class _EditableTextEdit(QPlainTextEdit):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Transcriptor — transcripción y traducción de audio")
+        self.setWindowTitle("VoxNote — notas de audio y vídeo")
         self.resize(920, 720)
 
         self.repository = MediaRepository()

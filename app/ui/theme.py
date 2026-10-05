@@ -10,15 +10,29 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 # -- settings ----------------------------------------------------------------
-_SETTINGS_ORG = "Transcript"
-_SETTINGS_APP = "Transcript"
+_SETTINGS_ORG = "VoxNote"
+_SETTINGS_APP = "VoxNote"
+# The product was called Transcript until the rename. The Qt registry key is
+# derived from these two strings, so renaming them orphans the old key: without
+# this fallback the user's theme silently resets on first launch after a rename.
+_LEGACY_ORG = "Transcript"
+_LEGACY_APP = "Transcript"
 _DARK_KEY = "ui/dark"
 
 
 def load_dark_setting() -> bool:
     """Return the persisted dark-mode preference (default: dark)."""
     settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
-    value = settings.value(_DARK_KEY, True)
+    if settings.contains(_DARK_KEY):
+        value = settings.value(_DARK_KEY)
+    else:
+        legacy = QSettings(_LEGACY_ORG, _LEGACY_APP)
+        if not legacy.contains(_DARK_KEY):
+            return True
+        value = legacy.value(_DARK_KEY)
+        # Migrate forward once so the legacy key is only ever read again by a
+        # build that predates the rename.
+        settings.setValue(_DARK_KEY, value)
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes")
     return bool(value)
