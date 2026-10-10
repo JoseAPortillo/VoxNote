@@ -34,6 +34,34 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 # Estado por defecto de la casilla "Separar hablantes"; la diarización es opcional.
 DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "false").lower() == "true"
 
+# Automatic summarization (Ollama, local) ------------------------------------
+# Modelo local usado por "Generar notas de IA"; requiere Ollama instalado con el
+# modelo descargado (ollama pull <modelo>). La transcripción nunca sale de la
+# máquina: todo el tráfico va a localhost.
+SUMMARIZE_MODEL = os.getenv("SUMMARIZE_MODEL", "qwen-optimizado")
+
+
+def _resolve_ollama_host() -> str:
+    """Resolve the local Ollama client target.
+
+    Ollama sirve en OLLAMA_HOST=0.0.0.0 cuando se configura para la red local,
+    pero 0.0.0.0 es el destino "escuchar en todas las interfaces": ningún
+    cliente puede conectarse a él. Esta app es cliente local, así que ese valor
+    (muy común como variable de entorno) se mapea al localhost por defecto.
+    """
+    raw = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    if raw.strip("/") == "0.0.0.0" or raw.startswith(("0.0.0.0:", "0.0.0.0/")):
+        return "http://localhost:11434"
+    return raw
+
+
+OLLAMA_HOST = _resolve_ollama_host()
+
+# Timeout (segundos) por llamada a Ollama. La primera llamada tras un arranque
+# en frío también carga el modelo en memoria, así que conviene que sea amplio,
+# sobre todo con modelos grandes (p. ej. qwen-optimizado, 27B).
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))
+
 # Media ----------------------------------------------------------------------
 SUPPORTED_EXTENSIONS = {
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",
