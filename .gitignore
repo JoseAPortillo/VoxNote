@@ -29,3 +29,6 @@ data/
 # OS
 Thumbs.db
 .DS_Store
+
+# Session handoff notes (local)
+SESSION_HANDOFF.md
