@@ -38,8 +38,14 @@ class InferenceWorker(QThread):
 
 
 class NotesWorker(QThread):
-    """Runs a notes-generation call (local Ollama) off the Qt main thread."""
+    """Runs a notes-generation call (Gemini API) off the Qt main thread.
 
+    ``partial`` carries the accumulated notes so far as the model streams them,
+    so the pane can show the note being written instead of a blind wait; ``done``
+    carries the whole text once, for persistence.
+    """
+
+    partial = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
@@ -50,6 +56,10 @@ class NotesWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.done.emit(self._generator.generate_notes(self._source))
+            parts: list[str] = []
+            for piece in self._generator.stream_notes(self._source):
+                parts.append(piece)
+                self.partial.emit("".join(parts))
+            self.done.emit("".join(parts))
         except Exception as exc:  # surface any failure in the UI
             self.failed.emit(str(exc))

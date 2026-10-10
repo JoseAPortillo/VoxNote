@@ -1,49 +1,45 @@
-"""Generation of structured, review-style notes from transcriptions through a
-local Ollama model.
+"""Generation of structured review notes from transcriptions through the Gemini
+API.
 
-The notes are computed entirely on the machine: the service talks to an
-Ollama instance on ``localhost`` (configurable via ``OLLAMA_HOST``), so no
-transcribed text ever leaves the computer. The model is picked per file with
-``SUMMARIZE_MODEL`` (default ``qwen-optimizado``); install Ollama and pull that
-model to use the feature.
+Unlike transcription and translation, which run on the machine, note
+generation is online: the base text (translation when present, else the
+transcript) is sent to Google's Gemini REST API. A key from Google AI Studio is
+required (``GEMINI_API_KEY``); without it the feature stays disabled. The
+default model, ``gemini-2.5-flash-lite``, makes personal use fit the free tier.
+
+Gemini's 1M-token context swallows a whole transcript, so there is no chunking
+and no map-reduce: one request produces the notes. The response is streamed, so
+the notes appear as they are written instead of after a long silent wait.
 
 The output is structured review notes about a work-review audio (a director /
 lead commenting on a take): general comments and tone first (approval,
 intention, reference/scoring choices), then topic-specific corrections grouped
 into sub-topics with concise bullets that keep the option/take numbers and the
 exact moment being discussed. The repeated line of the take playing in the
-background is identified and excluded. Long transcripts exceed a small model's
-context, so the text is split into paragraph chunks that are turned into notes
-independently and then consolidated into a single final structure
-(map-reduce).
+background is identified and excluded.
 """
 
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 
 from app.core.config import (
-    OLLAMA_HOST,
-    OLLAMA_TIMEOUT,
-    SUMMARIZE_MODEL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GEMINI_TIMEOUT,
     TRANSLATE_TARGET_LANG,
 )
 
-# Approximate character budget per chunk. It is deliberately below typical
-# 8K-token contexts so the model has room for instructions and the notes.
-CHUNK_CHARS = 12_000
-CHUNK_OVERLAP = 1_000
-# Above this the text is reduced into chunks instead of notes-written whole.
-REDUCE_CHARS = 16_000
+# Base of the Gemini REST API; the model and method are appended per request.
+API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# qwen-optimizado (Qwen 27B local) is a reasoning model: it spends a token
-# budget on a "thinking" phase before the final answer. Its Modelfile caps the
-# context at 4096 tokens, which a 12k-char chunk already exhausts: the model
-# then fills the remaining room with thinking and returns an empty response
-# (done_reason=length, no final text). Both the context window and the output
-# allowance are therefore raised explicitly per request.
-NUM_CONTEXT = 32_768
+# Upper bound for the generated notes. A work-review note is far shorter than
+# this; the cap only stops a runaway generation.
 MAX_OUTPUT_TOKENS = 8192
+
+# A low temperature keeps the notes close to what was said instead of inventing.
+TEMPERATURE = 0.3
 
 # Markers that separate, inside a note, the AI-generated block from the
 # manually written notes. Both survive regeneration of the AI block.
@@ -51,7 +47,7 @@ GENERATED_MARKER = "— Notas de IA —"
 MANUAL_MARKER = "— Tus notas —"
 
 # Small table for the prompt's language name; unknown codes fall back to the
-# code itself, and Ollama usually still understands them.
+# code itself, and the model usually still understands them.
 LANG_NAMES = {
     "es": "español",
     "en": "inglés",
@@ -109,51 +105,164 @@ _FORMAT_EXPLICIT = (
     "repetir ningún punto: cada corrección una sola vez."
 )
 
-
-class OllamaUnavailableError(RuntimeError):
-    """Ollama could not be reached, reported an error, or returned no text."""
-
-
-def chunk_text(
-    text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP
-) -> list[str]:
-    """Split ``text`` into paragraph chunks of at most ``size`` chars.
-
-    Consecutive chunks share an overlapping paragraph tail so a sentence
-    straddling a seam is still seen in full by the next chunk's notes. The
-    joined result preserves every paragraph exactly once, in order.
-    """
-    paragraphs = [p for p in text.splitlines() if p.strip()]
-    if not paragraphs:
-        return [""]
-    if len(text) <= size:
-        return [text]
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for para in paragraphs:
-        if current and current_len + len(para) + 1 > size:
-            chunks.append("\n".join(current))
-            # Keep the tail of the finished chunk (char-bounded) as overlap.
-            kept: list[str] = []
-            kept_len = 0
-            for previous in reversed(current):
-                if kept_len + len(previous) + 1 > overlap:
-                    break
-                kept.append(previous)
-                kept_len += len(previous) + 1
-            current = list(reversed(kept))
-            current_len = kept_len
-        current.append(para)
-        current_len += len(para) + 1
-    if current:
-        chunks.append("\n".join(current))
-    return chunks
+_EXTRACT_INSTRUCTION = (
+    "El texto siguiente es la transcripción de un audio de trabajo: una "
+    "persona (el director o el lead) revisa un trabajo y da sus notas. "
+    "IMPORTANTE: una línea corta se repite una y otra vez (la frase de la "
+    "toma que están revisando). Esa línea es la toma sonando de fondo: NO es "
+    "una nota ni una instrucción, úsala solo para saber de qué momento hablan "
+    "y NO la incluyas en las notas. Extrae las notas con dos bloques: "
+    "1) Comentarios generales y tono (aprobación general citando el texto si "
+    "lo hay, intención de la escena o el trabajo, elección de referencias y "
+    "de opciones numeradas); 2) Correcciones específicas por tema, agrupadas "
+    "en sub-temas (por ejemplo, mirada y ojos, cuerpo y cabeza, cortes o "
+    "edición por tomas), cada una en su viñeta e indicando la opción o el "
+    "momento exacto a que se refiere. Cada corrección debe aparecer UNA sola "
+    "vez. Escribe SOLO lo que se dice, sin inventar y sin mezclar el audio de "
+    "fondo. Explica siempre en claro qué se pide y sobre qué parte de la "
+    "toma; no dejes puntos que solo tengan una frase entre comillas o que den "
+    "por hecho el contexto."
+)
 
 
-def pack_partials(partials: list[str]) -> str:
-    """Join chunk notes into a labeled body for the consolidation pass."""
-    return "\n\n".join(f"Parte {i + 1}:\n{part}" for i, part in enumerate(partials))
+class NotesError(RuntimeError):
+    """Notes could not be generated: no key, a transport error, or no text."""
+
+
+class NotesGenerator:
+    """Writes structured review notes about transcribed text via Gemini."""
+
+    def __init__(
+        self,
+        api_key: str = GEMINI_API_KEY,
+        model: str = GEMINI_MODEL,
+        lang: str = TRANSLATE_TARGET_LANG,
+    ):
+        self.api_key = api_key.strip()
+        self.model = model
+        self.lang = lang
+        self._lang_name = LANG_NAMES.get(lang, lang)
+        self._timeout = GEMINI_TIMEOUT
+
+    @property
+    def configured(self) -> bool:
+        """Whether an API key is present; without it no request is possible."""
+        return bool(self.api_key)
+
+    # -- public API ----------------------------------------------------------
+
+    def generate_notes(self, text: str) -> str:
+        """Return structured notes about ``text`` (all streaming pieces joined)."""
+        return "".join(self.stream_notes(text))
+
+    def stream_notes(self, text: str) -> Iterator[str]:
+        """Yield the notes about ``text`` in the target language, piece by piece.
+
+        Empty input yields nothing and sends no request. A missing key, a
+        transport failure, or a response with no text raises :class:`NotesError`.
+        """
+        body = text.strip()
+        if not body:
+            return
+        if not self.api_key:
+            raise NotesError(
+                "Falta la clave de la API de Gemini (GEMINI_API_KEY). "
+                "Consíguela gratis en https://aistudio.google.com/apikey"
+            )
+        prompt = self._build_prompt(body)
+        request = self._build_request(prompt)
+        produced = False
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                for raw_line in response:
+                    for piece in self._parse_sse_line(raw_line):
+                        produced = True
+                        yield piece
+        except urllib.error.HTTPError as exc:
+            raise NotesError(self._http_message(exc)) from exc
+        except urllib.error.URLError as exc:
+            raise NotesError(
+                "No se pudo conectar con la API de Gemini. "
+                "Comprueba tu conexión a internet."
+            ) from exc
+        if not produced:
+            raise NotesError("Gemini no devolvió ningún texto.")
+
+    # -- internals -----------------------------------------------------------
+
+    def _build_prompt(self, body: str) -> str:
+        return (
+            f"{_EXTRACT_INSTRUCTION}\n\n"
+            f"{_FORMAT_INSTRUCTION}\n"
+            f"{_FORMAT_EXPLICIT.format(lang=self._lang_name)}\n\n"
+            f"Texto:\n\n{body}"
+        )
+
+    def _build_request(self, prompt: str) -> urllib.request.Request:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": TEMPERATURE,
+                "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            },
+        }
+        return urllib.request.Request(
+            f"{API_BASE}/models/{self.model}:streamGenerateContent?alt=sse",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            },
+            method="POST",
+        )
+
+    @staticmethod
+    def _parse_sse_line(raw_line: bytes) -> Iterator[str]:
+        """Yield the text pieces carried by one Server-Sent Events line.
+
+        Only ``data:`` lines matter; the JSON may carry several candidates or
+        parts. Reasoning parts (``thought: true``) are dropped so only the final
+        notes are shown.
+        """
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            return
+        data = line[len("data:"):].strip()
+        if not data or data == "[DONE]":
+            return
+        try:
+            obj = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        for candidate in obj.get("candidates", []) or []:
+            content = candidate.get("content") or {}
+            for part in content.get("parts", []) or []:
+                if part.get("thought"):
+                    continue
+                piece = part.get("text")
+                if piece:
+                    yield piece
+
+    @staticmethod
+    def _http_message(exc: urllib.error.HTTPError) -> str:
+        detail = ""
+        try:
+            payload = json.loads(exc.read().decode("utf-8", "replace"))
+            detail = (payload.get("error") or {}).get("message") or ""
+        except Exception:  # pragma: no cover - error body is best-effort
+            detail = ""
+        finally:
+            try:
+                exc.close()
+            except Exception:  # pragma: no cover - closing is best-effort
+                pass
+        if exc.code == 401 or exc.code == 403:
+            base = "La clave de la API de Gemini no es válida o no tiene permisos."
+        elif exc.code == 429:
+            base = "Se agotó la cuota de la API de Gemini (espera y reintenta)."
+        else:
+            base = f"La API de Gemini devolvió un error {exc.code}."
+        return f"{base} {detail}".strip()
 
 
 def upsert_generated_block(notes: str, generated: str) -> str:
@@ -181,125 +290,3 @@ def upsert_generated_block(notes: str, generated: str) -> str:
     if manual:
         return "\n".join(block) + f"\n\n{MANUAL_MARKER}\n{manual}"
     return "\n".join(block)
-
-
-class NotesGenerator:
-    """Writes structured review notes about transcribed text via Ollama."""
-
-    def __init__(
-        self,
-        host: str = OLLAMA_HOST,
-        model: str = SUMMARIZE_MODEL,
-        lang: str = TRANSLATE_TARGET_LANG,
-    ):
-        host = host.rstrip("/")
-        if not host.startswith(("http://", "https://")):
-            host = "http://" + host
-        self.host = host
-        self.model = model
-        self.lang = lang
-        self._lang_name = LANG_NAMES.get(lang, lang)
-        self._timeout = OLLAMA_TIMEOUT
-
-    # -- public API ----------------------------------------------------------
-
-    def generate_notes(self, text: str) -> str:
-        """Return structured notes about ``text`` in the target language.
-
-        Long texts are processed chunk-wise first and consolidated into one
-        final structure. An empty input returns an empty output without any
-        request.
-        """
-        text = text.strip()
-        if not text:
-            return ""
-        chunks = chunk_text(text)
-        if len(chunks) <= 1:
-            return self._call(chunks[0])
-        partials = [self._call(chunk) for chunk in chunks]
-        return self._call(pack_partials(partials), final_pass=True)
-
-    # -- internals -----------------------------------------------------------
-
-    def _call(self, body: str, final_pass: bool = False) -> str:
-        if final_pass:
-            instruction = (
-                "Las partes siguientes son notas ya extraídas de un audio "
-                "largo de revisión. Consolídalas en UNA sola estructura de "
-                "notas con el mismo formato y estilo del ejemplo: comentarios "
-                "generales y tono arriba, correcciones específicas agrupadas "
-                "por tema con sub-temas, eliminando duplicados y conservando "
-                "los números de opción o toma y los momentos exactos."
-            )
-            label = "Partes:"
-        else:
-            instruction = (
-                "El texto siguiente es la transcripción de un audio de "
-                "trabajo: una persona (el director o el lead) revisa un "
-                "trabajo y da sus notas. IMPORTANTE: una línea corta se "
-                "repite una y otra vez (la frase de la toma que están "
-                "revisando). Esa línea es la toma sonando de fondo: NO es una "
-                "nota ni una instrucción, úsala solo para saber de qué "
-                "momento hablan y NO la incluyas en las notas. Extrae las "
-                "notas con dos bloques: 1) Comentarios generales y tono "
-                "(aprobación general citando el texto si lo hay, intención de "
-                "la escena o el trabajo, elección de referencias y de "
-                "opciones numeradas); 2) Correcciones específicas por tema, "
-                "agrupadas en sub-temas (por ejemplo, mirada y ojos, cuerpo y "
-                "cabeza, cortes o edición por tomas), cada una en su viñeta e "
-                "indicando la opción o el momento exacto a que se refiere. "
-                "Cada corrección debe aparecer UNA sola vez. Escribe SOLO lo "
-                "que se dice, sin inventar y sin mezclar el audio de fondo. "
-                "Explica siempre en claro qué se pide y sobre qué parte de la "
-                "toma; no dejes puntos que solo tengan una frase entre "
-                "comillas o que den por hecho el contexto."
-            )
-            label = "Texto:"
-        prompt = (
-            f"{instruction}\n\n"
-            f"{_FORMAT_INSTRUCTION}\n"
-            f"{_FORMAT_EXPLICIT.format(lang=self._lang_name)}\n\n"
-            f"{label}\n\n{body}"
-        )
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "num_predict": MAX_OUTPUT_TOKENS,
-                "num_ctx": NUM_CONTEXT,
-            },
-        }
-        request = urllib.request.Request(
-            f"{self.host}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            raise OllamaUnavailableError(self._connection_message()) from exc
-        except (json.JSONDecodeError, OSError) as exc:
-            raise OllamaUnavailableError(
-                "Respuesta inesperada de Ollama."
-            ) from exc
-        if data.get("error"):
-            raise OllamaUnavailableError(data["error"])
-        result = (data.get("response") or "").strip()
-        if not result:
-            raise OllamaUnavailableError(
-                "Ollama no devolvió ningún texto. "
-                f"(done={data.get('done')}, done_reason={data.get('done_reason')}, "
-                f"eval_count={data.get('eval_count')}, "
-                f"thinking_len={len(data.get('thinking') or '')})"
-            )
-        return result
-
-    def _connection_message(self) -> str:
-        return (
-            f"No se pudo conectar con Ollama en {self.host}. "
-            "Comprueba que Ollama esté en marcha."
-        )

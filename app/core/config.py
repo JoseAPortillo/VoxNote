@@ -34,33 +34,19 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 # Estado por defecto de la casilla "Separar hablantes"; la diarización es opcional.
 DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "false").lower() == "true"
 
-# Automatic summarization (Ollama, local) ------------------------------------
-# Modelo local usado por "Generar notas de IA"; requiere Ollama instalado con el
-# modelo descargado (ollama pull <modelo>). La transcripción nunca sale de la
-# máquina: todo el tráfico va a localhost.
-SUMMARIZE_MODEL = os.getenv("SUMMARIZE_MODEL", "qwen-optimizado")
+# Automatic summarization (Gemini API) ---------------------------------------
+# "Generar notas de IA" calls Google's Gemini through its REST API. A key from
+# Google AI Studio (https://aistudio.google.com/apikey) is required; without it
+# the feature stays disabled. The base text (translation or transcript) is sent
+# to Google, so it leaves the machine: transcription and translation remain
+# local, but note generation is online.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Default: the cheapest Flash model, which alone makes personal use free-tier.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
-
-def _resolve_ollama_host() -> str:
-    """Resolve the local Ollama client target.
-
-    Ollama sirve en OLLAMA_HOST=0.0.0.0 cuando se configura para la red local,
-    pero 0.0.0.0 es el destino "escuchar en todas las interfaces": ningún
-    cliente puede conectarse a él. Esta app es cliente local, así que ese valor
-    (muy común como variable de entorno) se mapea al localhost por defecto.
-    """
-    raw = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    if raw.strip("/") == "0.0.0.0" or raw.startswith(("0.0.0.0:", "0.0.0.0/")):
-        return "http://localhost:11434"
-    return raw
-
-
-OLLAMA_HOST = _resolve_ollama_host()
-
-# Timeout (segundos) por llamada a Ollama. La primera llamada tras un arranque
-# en frío también carga el modelo en memoria, así que conviene que sea amplio,
-# sobre todo con modelos grandes (p. ej. qwen-optimizado, 27B).
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))
+# Timeout (segundos) por llamada a Gemini. Streaming manda las notas según se
+# generan, así que basta con un margen amplio para la respuesta completa.
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "120"))
 
 # Media ----------------------------------------------------------------------
 SUPPORTED_EXTENSIONS = {

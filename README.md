@@ -7,7 +7,9 @@ the local machine. Transcription, translation, and optional speaker diarization
 are the tools that help you write those notes, and they all run locally: media
 files are never uploaded. It uses faster-whisper for transcription, Argos
 Translate for translation, and optional PyAnnote for speaker diarization.
-Validated on Windows with Python 3.14 and NVIDIA CUDA.
+Optionally, **Generar notas de IA** turns a transcription into organized notes
+through Google's Gemini API — the only step that goes online, and only when you
+press the button. Validated on Windows with Python 3.14 and NVIDIA CUDA.
 
 ## Quick path
 
@@ -43,7 +45,7 @@ Validated on Windows with Python 3.14 and NVIDIA CUDA.
 - Dual panes: original transcription + translation, persisted per file
 - Freely editable multiline notes in both panes, autosaved per media file
 - An always-visible **Notas** panel right of the file list: selecting a file shows its note and editing autosaves; the list is again a one-column registry, and the old popup editor is gone
-- **Generar notas de IA** extracts, with a local Ollama model (optional; the text never leaves the machine), organized notes of **what the lead/interlocutor asks**: tasks, instructions, corrections, deadlines and expectations, ignoring background audio, and keeps them as a distinct `— Notas de IA —` block at the top of its notes
+- **Generar notas de IA** extracts, with Google's Gemini API (free tier for personal use; the base text is sent to Google), organized notes of **what the lead/interlocutor asks**: tasks, instructions, corrections, deadlines and expectations, ignoring background audio, and keeps them as a distinct `— Notas de IA —` block at the top of its notes
 - Opt-in proportional `Sincronizar scroll` checkbox, enabled when the selected file has both transcription and translation
 - Audio playback in the main window; video playback in a dedicated window with a video surface, play/pause, seek, and time display
 - Per-file aliases, annotations, original/translated text, and timestamped segments
@@ -67,14 +69,16 @@ list. It is a normal multiline editor: typing autosaves that file's annotation
 (including a deliberate clear), and switching files swaps the content. There is
 no popup window anymore — the panel is always on screen.
 
-With a transcription (or translation) available, **Generar notas de IA** asks a
-local Ollama model to extract, from the selected file's base text, organized
-notes of **what the lead or interlocutor asks of you**: tasks, instructions,
+With a transcription (or translation) available, **Generar notas de IA** asks
+Google's Gemini to extract, from the selected file's base text, organized notes
+of **what the lead or interlocutor asks of you**: tasks, instructions,
 corrections, deadlines and expectations — ignoring background audio and other
 voices — and inserts them at the top of its note as a `— Notas de IA —` block.
-The rest of the note lives under a `— Tus notas —` block and is never touched
-by regenerating the AI notes. The feature is optional: without Ollama
-installed it shows clear setup steps (`ollama pull qwen-optimizado`).
+The notes stream into the pane as they are written, so there is no blind wait.
+The rest of the note lives under a `— Tus notas —` block and is never touched by
+regenerating the AI notes. The feature needs a free API key from Google AI
+Studio; without one it shows clear setup steps. The base text is sent to Google
+(see [Privacy](#privacy)).
 
 ### Transcribe, translate, and diarize
 
@@ -170,9 +174,9 @@ and restored on the next launch.
 | `TRANSLATE_TARGET_LANG` | `es` | Argos output language code |
 | `HF_TOKEN` | *(empty)* | Hugging Face token required when speaker diarization is enabled |
 | `DIARIZE_SPEAKERS` | `false` | Default state of the "Separar hablantes" checkbox; diarization is opt-in and requires `HF_TOKEN` when enabled |
-| `SUMMARIZE_MODEL` | `qwen-optimizado` | Local Ollama model used by **Generar notas de IA**. The default is a local 27B Qwen tuned for quality; the first call after a cold start can take minutes while the model loads. Use a smaller one (e.g. `llama3.1:8b`) for speed at the cost of clarity |
-| `OLLAMA_HOST` | `http://localhost:11434` | Where the local Ollama service listens; the text never leaves the machine |
-| `OLLAMA_TIMEOUT` | `900` | Per-call timeout (seconds); generous because a cold start must load the model first |
+| `GEMINI_API_KEY` | *(empty)* | Key from Google AI Studio used by **Generar notas de IA**; without it the button is disabled |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model for **Generar notas de IA**. The default is the cheapest and fits the free tier; a stronger model (e.g. `gemini-2.5-flash`) gives better notes for a few cents |
+| `GEMINI_TIMEOUT` | `120` | Per-call timeout (seconds) for the Gemini request |
 
 An existing value in `.env` takes precedence over the code default.
 
@@ -205,15 +209,26 @@ already cached:
 - PyAnnote may download its gated diarization model when diarization is enabled.
 
 After the required resources are cached, transcription, translation, and
-diarization run locally. `data/` (your media list) and `.env` (your token) stay
-local and are git-ignored — nothing is shared with the repository.
+diarization run locally. **Generar notas de IA** is the exception: it needs
+internet and a `GEMINI_API_KEY` each time it runs. `data/` (your media list) and
+`.env` (your HF token and API key) stay local and are git-ignored — nothing is
+shared with the repository.
 
 ## Privacy
 
-Processing and media files stay local. The app does not upload media or send it
-to a cloud service. Network access is limited to first-use resource retrieval:
-the faster-whisper model, Argos's package index and language pair, and the
-PyAnnote model when diarization is enabled. Cached resources are used locally.
+Processing and media files stay local. Transcription, translation, and
+diarization run on the machine, and media files are never uploaded. Network
+access is limited to first-use resource retrieval (the faster-whisper model,
+Argos's package index and language pair, and the PyAnnote model when diarization
+is enabled) plus **Generar notas de IA**.
+
+That one feature is online: pressing it sends the selected file's base text (the
+translation, or the transcript when there is none) to Google's Gemini API, over
+HTTPS, using your `GEMINI_API_KEY`. It does not send the media file. On the
+**free tier Google may use the prompts to improve its products**; if the source
+text is sensitive, do not use AI notes, or use a paid Gemini tier (paid-tier
+data is not used for training). Without a key, the button is disabled and
+everything else works exactly as before.
 
 ## Troubleshooting
 

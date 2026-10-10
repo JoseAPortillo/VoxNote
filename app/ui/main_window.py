@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         self.generator = NotesGenerator()
         self._notes_worker: NotesWorker | None = None
         self._notes_path: str | None = None
+        self._notes_original: str = ""  # note text before an AI generation run
         self._last_run: RunResult | None = None
         self._active_pane: str = "transcript"  # pane receiving live segments
         self._running_path: str | None = None  # path persisted on done
@@ -373,8 +374,8 @@ class MainWindow(QMainWindow):
         self.btn_generate_notes.setObjectName("primaryButton")
         self.btn_generate_notes.setToolTip(
             "Genera notas estructuradas sobre la transcripción o traducción "
-            "del archivo seleccionado con un modelo local (Ollama) y las "
-            "inserta al inicio de tus notas."
+            "del archivo seleccionado con la API de Gemini y las inserta al "
+            "inicio de tus notas."
         )
         self.btn_generate_notes.setEnabled(False)
         header.addWidget(title)
@@ -1315,21 +1316,46 @@ class MainWindow(QMainWindow):
                 "del que extraer notas.",
             )
             return
+        if not self.generator.configured:
+            QMessageBox.information(
+                self,
+                "Generar notas de IA",
+                "Falta la clave de la API de Gemini.\n\n"
+                "Consigue una gratis en https://aistudio.google.com/apikey "
+                "y guárdala en tu archivo .env como:\n\n"
+                "  GEMINI_API_KEY=tu_clave\n\n"
+                "Después reinicia esta aplicación.",
+            )
+            return
         self._notes_path = self.media_list.selected_path()
-        self.status_label.setText("Generando notas de IA (Ollama)…")
+        # Capture the note before the run: every streamed piece replaces only
+        # the generated block, so the user's own notes are never touched.
+        self._notes_original = self.pane_notes.toPlainText()
+        self.status_label.setText("Generando notas de IA (Gemini)…")
         self.btn_generate_notes.setEnabled(False)
         self._set_generating_notes(True)
         worker = NotesWorker(source, self.generator, parent=self)
+        worker.partial.connect(self._on_notes_partial)
         worker.done.connect(self._on_notes_done)
         worker.failed.connect(self._on_notes_failed)
         worker.finished.connect(worker.deleteLater)
         self._notes_worker = worker
         worker.start()
 
+    def _on_notes_partial(self, accumulated: str) -> None:
+        """Show the note as it is written, keeping the user's own notes intact."""
+        if (
+            self._notes_path is not None
+            and self.media_list.selected_path() == self._notes_path
+        ):
+            self._set_pane_text(
+                "notes", upsert_generated_block(self._notes_original, accumulated)
+            )
+
     def _on_notes_done(self, generated: str) -> None:
         path = self._notes_path
         if path is not None:
-            new_text = upsert_generated_block(self.pane_notes.toPlainText(), generated)
+            new_text = upsert_generated_block(self._notes_original, generated)
             if self.media_list.selected_path() == path:
                 self._set_pane_text("notes", new_text)
             # Reroute persistence through the debounced autosave so a note edit
@@ -1338,26 +1364,32 @@ class MainWindow(QMainWindow):
             self._pending_note_saves["notes"] = (path, new_text)
             self._notes_save_timer.start()
         self._notes_path = None
+        self._notes_original = ""
         self.status_label.setText("Notas de IA generadas y guardadas.")
         self._set_generating_notes(False)
 
     def _on_notes_failed(self, message: str) -> None:
+        # Drop any partial preview and restore the note as it was before the run.
+        if (
+            self._notes_path is not None
+            and self.media_list.selected_path() == self._notes_path
+        ):
+            self._set_pane_text("notes", self._notes_original)
         self._notes_path = None
+        self._notes_original = ""
         self.status_label.setText("Error al generar las notas de IA.")
         self._set_generating_notes(False)
         QMessageBox.critical(
             self,
             "Generar notas de IA",
-            "No se pudieron generar las notas con el modelo local (Ollama).\n\n"
-            f"{message}\n\n"
-            "Instala Ollama (https://ollama.com/download) y descarga el modelo:\n"
-            f"  ollama pull {self.generator.model}\n"
-            "Después reinicia esta aplicación.",
+            "No se pudieron generar las notas con la API de Gemini.\n\n"
+            f"{message}",
         )
 
     def _set_generating_notes(self, generating: bool) -> None:
-        """Block the registry while notes generation reads repository state."""
+        """Block the registry and the note while generation streams into it."""
         self.media_list.setEnabled(not generating)
+        self.pane_notes.setReadOnly(generating)
         self._refresh_buttons(busy=generating)
 
     def _suggested_save_path(self) -> str:
