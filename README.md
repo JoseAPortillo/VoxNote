@@ -42,6 +42,7 @@ Validated on Windows with Python 3.14 and NVIDIA CUDA.
 - Optional speaker diarization with `[Hablante N]` labels; it must be explicitly enabled and requires `HF_TOKEN`
 - Dual panes: original transcription + translation, persisted per file
 - Freely editable multiline notes in both panes, autosaved per media file
+- An always-visible **Notas** panel right of the file list: selecting a file shows its note and editing autosaves; the list is again a one-column registry, and the old popup editor is gone
 - Opt-in proportional `Sincronizar scroll` checkbox, enabled when the selected file has both transcription and translation
 - Audio playback in the main window; video playback in a dedicated window with a video surface, play/pause, seek, and time display
 - Per-file aliases, annotations, original/translated text, and timestamped segments
@@ -53,10 +54,17 @@ Validated on Windows with Python 3.14 and NVIDIA CUDA.
 ### Add and organize files
 
 Drag and drop supported media into the list. Double-click a file name, or use
-the context menu, to edit its alias. Click the annotation cell to open a
-multi-line annotation popup: `Ctrl+Enter` saves and closes it, `Esc` cancels
-without saving, and clicking outside auto-saves. Right-click a file for
-`Cambiar alias…`, `Copiar ruta`, and `Eliminar de la lista`.
+the context menu, to edit its alias. The list keeps a single **Archivo**
+column: the play/pause icon on the left, the alias next to it, and the per-file
+note lives in the **Notas** panel to the right of the list. Right-click a file
+for `Cambiar alias…`, `Copiar ruta`, and `Eliminar de la lista`.
+
+### Take notes
+
+Select a row and the file's note appears in the **Notas** panel, right of the
+list. It is a normal multiline editor: typing autosaves that file's annotation
+(including a deliberate clear), and switching files swaps the content. There is
+no popup window anymore — the panel is always on screen.
 
 ### Transcribe, translate, and diarize
 

@@ -418,16 +418,13 @@ QPlainTextEdit, QTextEdit {
 }
 QAbstractScrollArea::corner { background: transparent; }
 
-/* ===== Annotation popup editor ===== */
-QFrame#annotationPopup {
-    background-color: $surface;
-    border: 1px solid $border;
-    border-radius: 8px;
+/* ===== Splitter (media list / notes) ===== */
+QSplitter::handle {
+    background-color: transparent;
 }
-QLabel#annotationPopupHint {
-    color: $text_muted;
-    font-size: 11px;
-    padding: 0;
+QSplitter::handle:hover {
+    background-color: $hover;
+    border-radius: 4px;
 }
 
 /* ===== Line edit (dialogs) ===== */

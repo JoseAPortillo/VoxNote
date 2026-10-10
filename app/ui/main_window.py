@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -223,7 +224,7 @@ class MainWindow(QMainWindow):
             header.addWidget(logo)
         hint = QLabel(
             "Arrastra vídeos o audios aquí · doble clic en el nombre: alias · "
-            "clic en la anotación: editarla · edita los paneles libremente · "
+            "edita las notas a la derecha y los paneles libremente · "
             "botón derecho: menú"
         )
         hint.setObjectName("hintLabel")
@@ -237,8 +238,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         self._update_theme_button()
 
+        # List + notes side by side: the notes pane is the standing home of the
+        # per-file annotation, and the list row is its selector. A splitter lets
+        # the user give the list (or the notes) more room without resizing the
+        # transcription/translation panes below.
         self.media_list = MediaList(self.repository)
-        layout.addWidget(self.media_list, stretch=3)
+        pane_notes = self._make_notes_pane()
+        list_notes = QSplitter(Qt.Orientation.Horizontal)
+        list_notes.setChildrenCollapsible(False)
+        list_notes.addWidget(self.media_list)
+        list_notes.addWidget(pane_notes)
+        list_notes.setSizes([280, 340])
+        list_notes.setStretchFactor(0, 3)
+        list_notes.setStretchFactor(1, 3)
+        layout.addWidget(list_notes, stretch=3)
 
         # Playback bar: seek slider + elapsed/total time (hidden until a
         # source is loaded; durationChanged shows it). The slice is drawn by the
@@ -342,7 +355,27 @@ class MainWindow(QMainWindow):
         column.addWidget(edit, stretch=1)
         return pane, edit
 
+    def _make_notes_pane(self) -> QWidget:
+        """Build the standing notes panel: a title and the editor."""
+        container = QWidget()
+        column = QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        header = QLabel("Notas")
+        header.setObjectName("paneLabel")
+        column.addWidget(header)
+        self.pane_notes = _EditableTextEdit()
+        self.pane_notes.setReadOnly(False)
+        self.pane_notes.setPlaceholderText(
+            "Tus notas sobre este archivo. La anotación se guarda sola."
+        )
+        self.pane_notes.setAccessibleName("Notas")
+        column.addWidget(self.pane_notes, stretch=1)
+        return container
+
     def _pane_for(self, side: str) -> _EditableTextEdit:
+        if side == "notes":
+            return self.pane_notes
         return self.pane_transcript if side == "transcript" else self.pane_translation
 
     def _set_pane_text(self, side: str, text: str) -> None:
@@ -365,8 +398,22 @@ class MainWindow(QMainWindow):
         self._notes_save_timer.start()
         self._refresh_scroll_sync()
 
+    def _on_notes_text_changed(self) -> None:
+        """Queue a debounced autosave of the notes pane into ``annotation``."""
+        if self._notes_programmatic_update or self.pane_notes.programmatic_change:
+            return
+        path = self.media_list.selected_path()
+        if path is None:
+            return
+        self._pending_note_saves["notes"] = (path, self.pane_notes.toPlainText())
+        self._notes_save_timer.start()
+
     def _flush_notes_autosave(self) -> None:
-        """Persist pending edits, including empty strings, for their media."""
+        """Persist pending edits, including empty strings, for their media.
+
+        The ``notes`` side maps to ``annotation``; the transcript/translation
+        sides map to their edited-document fields.
+        """
         self._notes_save_timer.stop()
         if not self._pending_note_saves:
             return
@@ -381,11 +428,15 @@ class MainWindow(QMainWindow):
             index = self.repository.index_of(path)
             if index is None:
                 continue
-            self.repository.update_edited_text(
-                index,
-                transcript_text=values.get("transcript"),
-                translation_text=values.get("translation"),
-            )
+            if "notes" in values:
+                self.repository.update_annotation(index, values["notes"])
+            edited = {
+                f"{side}_text": text
+                for side, text in values.items()
+                if side in ("transcript", "translation")
+            }
+            if edited:
+                self.repository.update_edited_text(index, **edited)
 
     def _refresh_scroll_sync(self) -> None:
         has_both_text = self._scroll_sync_eligible and bool(
@@ -458,6 +509,7 @@ class MainWindow(QMainWindow):
         self.pane_translation.textChanged.connect(
             lambda: self._on_pane_text_changed("translation")
         )
+        self.pane_notes.textChanged.connect(self._on_notes_text_changed)
         self.pane_transcript.verticalScrollBar().valueChanged.connect(
             lambda value: self._synchronize_scroll(
                 self.pane_transcript, self.pane_translation, value
@@ -1160,6 +1212,7 @@ class MainWindow(QMainWindow):
         if path is None:
             self._set_pane_text("transcript", "")
             self._set_pane_text("translation", "")
+            self._set_pane_text("notes", "")
             self._last_run = None
             self._refresh_scroll_sync()
             self._refresh_buttons()
@@ -1179,10 +1232,12 @@ class MainWindow(QMainWindow):
             )
             self._set_pane_text("transcript", transcript_text)
             self._set_pane_text("translation", translation_text)
+            self._set_pane_text("notes", item.annotation or "")
             self._last_run = self._stored_run_result(item)
         else:
             self._set_pane_text("transcript", "")
             self._set_pane_text("translation", "")
+            self._set_pane_text("notes", "")
             self._last_run = None
         self._scroll_sync_eligible = bool(
             self.pane_transcript.toPlainText() and self.pane_translation.toPlainText()
