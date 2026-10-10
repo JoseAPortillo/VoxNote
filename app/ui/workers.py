@@ -35,3 +35,21 @@ class InferenceWorker(QThread):
             self.done.emit(result)
         except Exception as exc:  # surface any failure in the UI
             self.failed.emit(str(exc))
+
+
+class NotesWorker(QThread):
+    """Runs a notes-generation call (local Ollama) off the Qt main thread."""
+
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, source: str, generator, parent=None):
+        super().__init__(parent)
+        self._source = source
+        self._generator = generator
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self._generator.generate_notes(self._source))
+        except Exception as exc:  # surface any failure in the UI
+            self.failed.emit(str(exc))

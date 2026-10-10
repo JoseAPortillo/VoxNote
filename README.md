@@ -43,6 +43,7 @@ Validated on Windows with Python 3.14 and NVIDIA CUDA.
 - Dual panes: original transcription + translation, persisted per file
 - Freely editable multiline notes in both panes, autosaved per media file
 - An always-visible **Notas** panel right of the file list: selecting a file shows its note and editing autosaves; the list is again a one-column registry, and the old popup editor is gone
+- **Generar notas de IA** extracts, with a local Ollama model (optional; the text never leaves the machine), organized notes of **what the lead/interlocutor asks**: tasks, instructions, corrections, deadlines and expectations, ignoring background audio, and keeps them as a distinct `— Notas de IA —` block at the top of its notes
 - Opt-in proportional `Sincronizar scroll` checkbox, enabled when the selected file has both transcription and translation
 - Audio playback in the main window; video playback in a dedicated window with a video surface, play/pause, seek, and time display
 - Per-file aliases, annotations, original/translated text, and timestamped segments
@@ -59,12 +60,21 @@ column: the play/pause icon on the left, the alias next to it, and the per-file
 note lives in the **Notas** panel to the right of the list. Right-click a file
 for `Cambiar alias…`, `Copiar ruta`, and `Eliminar de la lista`.
 
-### Take notes
+### Take notes and let the AI annotate
 
 Select a row and the file's note appears in the **Notas** panel, right of the
 list. It is a normal multiline editor: typing autosaves that file's annotation
 (including a deliberate clear), and switching files swaps the content. There is
 no popup window anymore — the panel is always on screen.
+
+With a transcription (or translation) available, **Generar notas de IA** asks a
+local Ollama model to extract, from the selected file's base text, organized
+notes of **what the lead or interlocutor asks of you**: tasks, instructions,
+corrections, deadlines and expectations — ignoring background audio and other
+voices — and inserts them at the top of its note as a `— Notas de IA —` block.
+The rest of the note lives under a `— Tus notas —` block and is never touched
+by regenerating the AI notes. The feature is optional: without Ollama
+installed it shows clear setup steps (`ollama pull qwen-optimizado`).
 
 ### Transcribe, translate, and diarize
 
@@ -160,6 +170,9 @@ and restored on the next launch.
 | `TRANSLATE_TARGET_LANG` | `es` | Argos output language code |
 | `HF_TOKEN` | *(empty)* | Hugging Face token required when speaker diarization is enabled |
 | `DIARIZE_SPEAKERS` | `false` | Default state of the "Separar hablantes" checkbox; diarization is opt-in and requires `HF_TOKEN` when enabled |
+| `SUMMARIZE_MODEL` | `qwen-optimizado` | Local Ollama model used by **Generar notas de IA**. The default is a local 27B Qwen tuned for quality; the first call after a cold start can take minutes while the model loads. Use a smaller one (e.g. `llama3.1:8b`) for speed at the cost of clarity |
+| `OLLAMA_HOST` | `http://localhost:11434` | Where the local Ollama service listens; the text never leaves the machine |
+| `OLLAMA_TIMEOUT` | `900` | Per-call timeout (seconds); generous because a cold start must load the model first |
 
 An existing value in `.env` takes precedence over the code default.
 

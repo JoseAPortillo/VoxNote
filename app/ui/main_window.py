@@ -27,6 +27,7 @@ from app.services.exporter import (
     export_edited_text,
 )
 from app.services.pipeline import Pipeline
+from app.services.summarizer import NotesGenerator, upsert_generated_block
 from app.services.transcriber import Transcriber
 from app.storage.repository import MediaRepository
 from app.ui.app_icon import header_logo_label
@@ -34,7 +35,7 @@ from app.ui.media_list import MediaList
 from app.ui.seek_slider import SeekSlider
 from app.ui.theme import apply_theme, load_dark_setting, save_dark_setting
 from app.ui.video_player_window import VideoPlayerWindow
-from app.ui.workers import InferenceWorker
+from app.ui.workers import InferenceWorker, NotesWorker
 
 
 def resolve_slice_position(
@@ -166,6 +167,9 @@ class MainWindow(QMainWindow):
         # writing results and the slice back through self.repository.
         self.pipeline = Pipeline(Transcriber(), target_lang=TRANSLATE_TARGET_LANG)
         self._worker: InferenceWorker | None = None
+        self.generator = NotesGenerator()
+        self._notes_worker: NotesWorker | None = None
+        self._notes_path: str | None = None
         self._last_run: RunResult | None = None
         self._active_pane: str = "transcript"  # pane receiving live segments
         self._running_path: str | None = None  # path persisted on done
@@ -356,14 +360,27 @@ class MainWindow(QMainWindow):
         return pane, edit
 
     def _make_notes_pane(self) -> QWidget:
-        """Build the standing notes panel: a title and the editor."""
+        """Build the notes panel: header with the AI-notes button + editor."""
         container = QWidget()
         column = QVBoxLayout(container)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
-        header = QLabel("Notas")
-        header.setObjectName("paneLabel")
-        column.addWidget(header)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title = QLabel("Notas")
+        title.setObjectName("paneLabel")
+        self.btn_generate_notes = QPushButton("Generar notas de IA")
+        self.btn_generate_notes.setObjectName("primaryButton")
+        self.btn_generate_notes.setToolTip(
+            "Genera notas estructuradas sobre la transcripción o traducción "
+            "del archivo seleccionado con un modelo local (Ollama) y las "
+            "inserta al inicio de tus notas."
+        )
+        self.btn_generate_notes.setEnabled(False)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.btn_generate_notes)
+        column.addLayout(header)
         self.pane_notes = _EditableTextEdit()
         self.pane_notes.setReadOnly(False)
         self.pane_notes.setPlaceholderText(
@@ -501,6 +518,7 @@ class MainWindow(QMainWindow):
         self.btn_translate.clicked.connect(self._start_translate)
         self.btn_save.clicked.connect(self._start_save)
         self.btn_save_edited.clicked.connect(self._start_save_edited)
+        self.btn_generate_notes.clicked.connect(self._start_generate_notes)
         self.btn_theme.clicked.connect(self._toggle_theme)
         self.chk_scroll_sync.toggled.connect(self._on_scroll_sync_toggled)
         self.pane_transcript.textChanged.connect(
@@ -1269,6 +1287,79 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Error.")
         QMessageBox.critical(self, "Error", message)
 
+    def _notes_source(self) -> str | None:
+        """The base result notes would be extracted from, or ``None``.
+
+        The translation wins when present (it is the text the user reads in
+        Spanish); otherwise the original transcript. Edited pane text is never
+        the source: the base result is stable and regenerating notes must not
+        depend on how the panes were hand-edited.
+        """
+        path = self.media_list.selected_path()
+        if path is None:
+            return None
+        idx = self.repository.index_of(path)
+        item = self.repository.get(idx) if idx is not None else None
+        if item is None:
+            return None
+        return item.translation_text or item.transcript_text or None
+
+    def _start_generate_notes(self) -> None:
+        self._flush_notes_autosave()
+        source = self._notes_source()
+        if not source:
+            QMessageBox.information(
+                self,
+                "Generar notas de IA",
+                "Este archivo no tiene texto transcrito ni traducido "
+                "del que extraer notas.",
+            )
+            return
+        self._notes_path = self.media_list.selected_path()
+        self.status_label.setText("Generando notas de IA (Ollama)…")
+        self.btn_generate_notes.setEnabled(False)
+        self._set_generating_notes(True)
+        worker = NotesWorker(source, self.generator, parent=self)
+        worker.done.connect(self._on_notes_done)
+        worker.failed.connect(self._on_notes_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._notes_worker = worker
+        worker.start()
+
+    def _on_notes_done(self, generated: str) -> None:
+        path = self._notes_path
+        if path is not None:
+            new_text = upsert_generated_block(self.pane_notes.toPlainText(), generated)
+            if self.media_list.selected_path() == path:
+                self._set_pane_text("notes", new_text)
+            # Reroute persistence through the debounced autosave so a note edit
+            # that happened while the notes ran is never clobbered by a stale
+            # pending save: the latest text always wins on flush.
+            self._pending_note_saves["notes"] = (path, new_text)
+            self._notes_save_timer.start()
+        self._notes_path = None
+        self.status_label.setText("Notas de IA generadas y guardadas.")
+        self._set_generating_notes(False)
+
+    def _on_notes_failed(self, message: str) -> None:
+        self._notes_path = None
+        self.status_label.setText("Error al generar las notas de IA.")
+        self._set_generating_notes(False)
+        QMessageBox.critical(
+            self,
+            "Generar notas de IA",
+            "No se pudieron generar las notas con el modelo local (Ollama).\n\n"
+            f"{message}\n\n"
+            "Instala Ollama (https://ollama.com/download) y descarga el modelo:\n"
+            f"  ollama pull {self.generator.model}\n"
+            "Después reinicia esta aplicación.",
+        )
+
+    def _set_generating_notes(self, generating: bool) -> None:
+        """Block the registry while notes generation reads repository state."""
+        self.media_list.setEnabled(not generating)
+        self._refresh_buttons(busy=generating)
+
     def _suggested_save_path(self) -> str:
         """Suggested target for the save dialog: media folder, ``<stem>.<lang>.txt``."""
         source = self.media_list.selected_path()
@@ -1374,6 +1465,9 @@ class MainWindow(QMainWindow):
         self.btn_translate.setEnabled(not busy and has_selection)
         self.btn_save.setEnabled(not busy and self._last_run is not None)
         self.btn_save_edited.setEnabled(not busy and has_selection)
+        self.btn_generate_notes.setEnabled(
+            not busy and has_selection and self._notes_source() is not None
+        )
         self._refresh_scroll_sync()
 
     def closeEvent(self, event) -> None:
@@ -1383,15 +1477,16 @@ class MainWindow(QMainWindow):
         # even when nothing was playing.
         if self.video_window is not None:
             self.video_window.hide()
-        # The worker may already be gone after a completed run
+        # The workers may already be gone after a completed run
         # (finished → deleteLater): a deleted C++ object raises RuntimeError,
         # which here simply means "no longer running".
-        if self._worker is not None:
-            try:
-                running = self._worker.isRunning()
-            except RuntimeError:
-                running = False
-            if running:
-                self.status_label.setText("Esperando a que termine la tarea…")
-                self._worker.wait()
+        for worker in (self._worker, self._notes_worker):
+            if worker is not None:
+                try:
+                    running = worker.isRunning()
+                except RuntimeError:
+                    running = False
+                if running:
+                    self.status_label.setText("Esperando a que termine la tarea…")
+                    worker.wait()
         super().closeEvent(event)
