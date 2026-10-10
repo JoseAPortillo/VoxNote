@@ -41,8 +41,9 @@ DIARIZE_SPEAKERS = os.getenv("DIARIZE_SPEAKERS", "false").lower() == "true"
 # to Google, so it leaves the machine: transcription and translation remain
 # local, but note generation is online.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-# Default: the cheapest Flash model, which alone makes personal use free-tier.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# Default: the ``-latest`` alias follows the cheapest Flash-Lite release, so a
+# versioned model being retired for new accounts does not disable the feature.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 
 # Timeout (segundos) por llamada a Gemini. Streaming manda las notas según se
 # generan, así que basta con un margen amplio para la respuesta completa.

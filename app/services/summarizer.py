@@ -5,7 +5,9 @@ Unlike transcription and translation, which run on the machine, note
 generation is online: the base text (translation when present, else the
 transcript) is sent to Google's Gemini REST API. A key from Google AI Studio is
 required (``GEMINI_API_KEY``); without it the feature stays disabled. The
-default model, ``gemini-2.5-flash-lite``, makes personal use fit the free tier.
+default model, the ``gemini-flash-lite-latest`` alias, tracks the cheapest
+Flash-Lite release so personal use keeps fitting the free tier even after a
+versioned model is retired.
 
 Gemini's 1M-token context swallows a whole transcript, so there is no chunking
 and no map-reduce: one request produces the notes. The response is streamed, so

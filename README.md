@@ -175,7 +175,7 @@ and restored on the next launch.
 | `HF_TOKEN` | *(empty)* | Hugging Face token required when speaker diarization is enabled |
 | `DIARIZE_SPEAKERS` | `false` | Default state of the "Separar hablantes" checkbox; diarization is opt-in and requires `HF_TOKEN` when enabled |
 | `GEMINI_API_KEY` | *(empty)* | Key from Google AI Studio used by **Generar notas de IA**; without it the button is disabled |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model for **Generar notas de IA**. The default is the cheapest and fits the free tier; a stronger model (e.g. `gemini-2.5-flash`) gives better notes for a few cents |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Gemini model for **Generar notas de IA**. The default alias tracks the cheapest Flash-Lite release and fits the free tier; a stronger model (e.g. `gemini-flash-latest`) gives better notes for a few cents. A pinned version (e.g. `gemini-3.5-flash-lite`) works too, but Google retires old versions for new accounts |
 | `GEMINI_TIMEOUT` | `120` | Per-call timeout (seconds) for the Gemini request |
 
 An existing value in `.env` takes precedence over the code default.
